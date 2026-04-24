@@ -42,3 +42,13 @@ class FaceRegisterRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError('Tối đa 10 ảnh')
         
         return value
+
+
+class FaceValidateRequestSerializer(serializers.Serializer):
+    """Serializer for pre-validating a single base64 face image."""
+    image = serializers.CharField()
+
+    def validate_image(self, value):
+        if not value:
+            raise serializers.ValidationError('Thiếu dữ liệu ảnh')
+        return value

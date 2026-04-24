@@ -9,13 +9,146 @@ from django.core.files.base import ContentFile
 from datetime import timedelta
 import base64
 import json
+import numpy as np
+import cv2
 from django.db import transaction
 
 from apps.employees.models import Employee
 from apps.attendance.models import AttendanceLog
 from .models import FaceEmbedding, FaceLog, FaceRegistration
-from .serializers import FaceRegisterRequestSerializer
+from .serializers import FaceRegisterRequestSerializer, FaceValidateRequestSerializer
 from .services import FaceRecognitionService
+
+
+class FaceValidateAPIView(APIView):
+    """Validate a single base64 image and report whether the face is clear enough."""
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = FaceValidateRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    'success': False,
+                    'is_clear': False,
+                    'message': 'Dữ liệu không hợp lệ',
+                    'errors': serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        image_data = serializer.validated_data['image']
+
+        try:
+            if ',' in image_data:
+                image_data = image_data.split(',')[1]
+
+            image_bytes = base64.b64decode(image_data)
+            nparr = np.frombuffer(image_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if frame is None:
+                return Response(
+                    {
+                        'success': True,
+                        'is_clear': False,
+                        'message': 'Ảnh không hợp lệ, vui lòng giữ máy ổn định.',
+                    }
+                )
+
+            service = FaceRecognitionService()
+            if service.detector is None:
+                service.initialize()
+
+            if service.detector is None:
+                return Response(
+                    {
+                        'success': False,
+                        'is_clear': False,
+                        'message': 'Bộ nhận diện khuôn mặt chưa sẵn sàng',
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+            detections = service.detector.detect(frame, conf_threshold=0.45)
+            if not detections:
+                return Response(
+                    {
+                        'success': True,
+                        'is_clear': False,
+                        'message': 'Chưa thấy khuôn mặt rõ trong khung.',
+                    }
+                )
+
+            best_face = max(detections, key=lambda d: d.w * d.h)
+            face_area = float(best_face.w * best_face.h)
+            frame_area = float(frame.shape[0] * frame.shape[1])
+            area_ratio = face_area / frame_area if frame_area > 0 else 0.0
+
+            x1, y1, x2, y2 = best_face.as_tuple()
+            face_crop = frame[max(y1, 0):max(y2, 0), max(x1, 0):max(x2, 0)]
+            if face_crop.size == 0:
+                return Response(
+                    {
+                        'success': True,
+                        'is_clear': False,
+                        'message': 'Không crop được khuôn mặt, vui lòng thử lại.',
+                    }
+                )
+
+            gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+            min_face_area_ratio = 0.08
+            min_blur_score = 60.0
+
+            if area_ratio < min_face_area_ratio:
+                return Response(
+                    {
+                        'success': True,
+                        'is_clear': False,
+                        'message': 'Khuôn mặt còn nhỏ, vui lòng đưa camera lại gần hơn.',
+                        'metrics': {
+                            'face_area_ratio': round(area_ratio, 4),
+                            'blur_score': round(blur_score, 2),
+                        },
+                    }
+                )
+
+            if blur_score < min_blur_score:
+                return Response(
+                    {
+                        'success': True,
+                        'is_clear': False,
+                        'message': 'Ảnh bị mờ, vui lòng giữ yên vài giây và đủ sáng.',
+                        'metrics': {
+                            'face_area_ratio': round(area_ratio, 4),
+                            'blur_score': round(blur_score, 2),
+                        },
+                    }
+                )
+
+            return Response(
+                {
+                    'success': True,
+                    'is_clear': True,
+                    'message': 'Khuôn mặt rõ, có thể chụp.',
+                    'metrics': {
+                        'face_area_ratio': round(area_ratio, 4),
+                        'blur_score': round(blur_score, 2),
+                    },
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {
+                    'success': False,
+                    'is_clear': False,
+                    'message': f'Lỗi kiểm tra ảnh: {str(e)}',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 class RecognizeAPIView(APIView):
     """
@@ -202,6 +335,11 @@ class FaceRegistrationAPIView(APIView):
         try:
             saved_count = 0
             with transaction.atomic():
+                # Xóa tất cả dữ liệu khuôn mặt cũ của nhân viên này (chỉ giữ 1 bộ duy nhất)
+                FaceEmbedding.objects.filter(employee=employee).delete()
+                FaceRegistration.objects.filter(user_id=str(user_id)).delete()
+                print(f"[FACE REGISTRATION] Đã xóa dữ liệu khuôn mặt cũ cho user {user_id}")
+                
                 for idx, image_data in enumerate(images):
                     try:
                         if ',' in image_data:

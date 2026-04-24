@@ -15,3 +15,5 @@ staticfiles/
 .vscode/
 .idea/
 *.swp
+
+AGENTS.md
