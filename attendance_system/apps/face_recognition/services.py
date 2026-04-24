@@ -1,4 +1,6 @@
 from pathlib import Path
+import time
+from uuid import uuid4
 import numpy as np
 import cv2
 from django.conf import settings
@@ -58,6 +60,100 @@ class FaceRecognitionService:
         import time
         if self.cached_embeddings is None or (time.time() - self.last_cache_update > self.CACHE_TTL):
             self._load_embeddings()
+
+    def _decode_face_crop(self, image_bytes):
+        """Decode raw image bytes and return the detected face crop."""
+        if self.detector is None:
+            self.initialize()
+
+        if self.detector is None:
+            raise ValueError("Face detector unavailable")
+
+        nparr = np.frombuffer(image_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            raise ValueError("Invalid image")
+
+        # Registration should be more tolerant than recognition matching.
+        reg_threshold = getattr(settings, 'FACE_REGISTER_DETECT_THRESHOLD', 0.45)
+        detections = self.detector.detect(frame, conf_threshold=reg_threshold)
+
+        # Fallback: upscale once for far-face / low-detail frames.
+        if not detections:
+            try:
+                h, w = frame.shape[:2]
+                upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+                detections = self.detector.detect(upscaled, conf_threshold=max(0.35, reg_threshold - 0.1))
+                if detections:
+                    frame = upscaled
+            except Exception:
+                detections = []
+
+        if not detections:
+            raise ValueError("No face detected")
+
+        best_face = max(detections, key=lambda d: d.w * d.h)
+        x1, y1, x2, y2 = best_face.as_tuple()
+        face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
+
+        if face_crop.size == 0:
+            raise ValueError("Invalid face crop")
+
+        return face_crop
+
+    def upload_face_image_to_cloudinary(self, image_bytes, employee_id):
+        """Detect, crop and upload face image to Cloudinary, returning the secure URL."""
+        try:
+            import cloudinary
+            import cloudinary.uploader
+        except Exception as exc:
+            raise ValueError(f"Cloudinary package not available: {exc}")
+
+        if not (
+            settings.CLOUDINARY_CLOUD_NAME
+            and settings.CLOUDINARY_API_KEY
+            and settings.CLOUDINARY_API_SECRET
+        ):
+            raise ValueError("Cloudinary chưa được cấu hình đầy đủ")
+
+        face_crop = self._decode_face_crop(image_bytes)
+        ok, encoded = cv2.imencode('.jpg', face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            raise ValueError("Không thể mã hóa ảnh khuôn mặt")
+
+        cloudinary.config(
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+            secure=True,
+        )
+
+        public_id = f"emp_{employee_id}_{int(time.time() * 1000)}_{uuid4().hex[:8]}"
+        upload_result = cloudinary.uploader.upload(
+            encoded.tobytes(),
+            folder=settings.FACE_CLOUDINARY_FOLDER,
+            public_id=public_id,
+            resource_type='image',
+            overwrite=False,
+        )
+
+        url = upload_result.get('secure_url') or upload_result.get('url')
+        if not url:
+            raise ValueError("Upload Cloudinary thành công nhưng không nhận được URL")
+
+        return url
+
+    def extract_embedding_from_bytes(self, image_bytes):
+        """Return a face embedding vector from raw image bytes."""
+        if self.embedder is None:
+            self.initialize()
+
+        if self.embedder is None:
+            raise ValueError("Face embedder unavailable")
+
+        face_crop = self._decode_face_crop(image_bytes)
+        return self.embedder.embed_face_bgr(face_crop)
 
     def _load_embeddings(self):
         """Load all embeddings from DB into numpy arrays."""
@@ -158,26 +254,7 @@ class FaceRecognitionService:
         """
         Embed and save face for employee.
         """
-        if self.detector is None or self.embedder is None:
-            self.initialize()
-            
-        nparr = np.frombuffer(image_bytes, dtype=np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if frame is None:
-            raise ValueError("Invalid image")
-            
-        detections = self.detector.detect(frame)
-        if not detections:
-             raise ValueError("No face detected")
-             
-        # Use square_crop as in original logic (better for MobileFaceNet)
-        best_face = max(detections, key=lambda d: d.w * d.h)
-        x1, y1, x2, y2 = best_face.as_tuple()
-        
-        face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
-        
-        embedding = self.embedder.embed_face_bgr(face_crop)
+        embedding = self.extract_embedding_from_bytes(image_bytes)
         
         try:
             emp = Employee.objects.get(pk=employee_id)

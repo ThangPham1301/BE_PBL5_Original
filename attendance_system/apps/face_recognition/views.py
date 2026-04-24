@@ -7,10 +7,14 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.files.base import ContentFile
 from datetime import timedelta
+import base64
+import json
+from django.db import transaction
 
 from apps.employees.models import Employee
 from apps.attendance.models import AttendanceLog
-from .models import FaceLog
+from .models import FaceEmbedding, FaceLog, FaceRegistration
+from .serializers import FaceRegisterRequestSerializer
 from .services import FaceRecognitionService
 
 class RecognizeAPIView(APIView):
@@ -140,4 +144,120 @@ class EnrollAPIView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class FaceRegistrationAPIView(APIView):
+    """
+    API Endpoint for Face Registration
+    
+    POST /api/face/register/
+    
+    Request:
+    {
+        "user_id": "123",
+        "images": ["base64_image_1", "base64_image_2", ...]
+    }
+    
+    Response:
+    {
+        "success": true,
+        "message": "Đã đăng ký khuôn mặt thành công",
+        "registration_id": 1,
+        "image_count": 5
+    }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = FaceRegisterRequestSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Dữ liệu không hợp lệ',
+                    'errors': serializer.errors
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user_id = serializer.validated_data['user_id']
+        images = serializer.validated_data['images']
+        service = FaceRecognitionService()
+
+        try:
+            try:
+                employee = Employee.objects.get(pk=user_id)
+            except Employee.DoesNotExist:
+                employee = Employee.objects.get(employee_id=user_id)
+        except Employee.DoesNotExist:
+            return Response(
+                {
+                    'success': False,
+                    'message': f'Không tìm thấy nhân viên cho user_id={user_id}'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            saved_count = 0
+            with transaction.atomic():
+                for idx, image_data in enumerate(images):
+                    try:
+                        if ',' in image_data:
+                            image_data = image_data.split(',')[1]
+
+                        image_bytes = base64.b64decode(image_data)
+                        image_url = service.upload_face_image_to_cloudinary(
+                            image_bytes=image_bytes,
+                            employee_id=employee.id,
+                        )
+
+                        FaceEmbedding.objects.create(
+                            employee=employee,
+                            cloudinary_url=image_url,
+                        )
+                        saved_count += 1
+                        print(f"[FACE REGISTRATION] Ảnh {idx + 1} cho user {user_id}: uploaded to Cloudinary")
+
+                    except Exception as e:
+                        print(f"[FACE REGISTRATION ERROR] Không thể xử lý ảnh {idx + 1}: {str(e)}")
+                        continue
+
+                if saved_count == 0:
+                    raise ValueError('Không có ảnh hợp lệ để upload')
+
+                registration = FaceRegistration.objects.create(
+                    user_id=user_id,
+                    image_count=saved_count,
+                    status='completed'
+                )
+
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Đã đăng ký khuôn mặt thành công',
+                    'registration_id': registration.id,
+                    'image_count': registration.image_count,
+                    'status': registration.status
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+        except ValueError as e:
+            return Response(
+                {
+                    'success': False,
+                    'message': str(e)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {
+                    'success': False,
+                    'message': f'Lỗi xử lý đăng ký: {str(e)}'
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 

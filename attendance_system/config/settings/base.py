@@ -156,6 +156,12 @@ SIMPLE_JWT = {
 FACE_MATCH_THRESHOLD = 0.35  # Giảm xuống 0.35 để dễ nhận diện hơn với Webcam thường
 FACE_CACHE_TTL = 30  # Seconds to cache embeddings
 
+# Cloudinary
+CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '')
+CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY', '')
+CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET', '')
+FACE_CLOUDINARY_FOLDER = os.getenv('FACE_CLOUDINARY_FOLDER', 'attendance/face_registrations')
+
 # Celery
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://127.0.0.1:6379/0')
