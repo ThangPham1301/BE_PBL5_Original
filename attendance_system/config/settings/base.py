@@ -155,6 +155,12 @@ SIMPLE_JWT = {
 # Face Recognition Settings
 FACE_MATCH_THRESHOLD = 0.35  # Giảm xuống 0.35 để dễ nhận diện hơn với Webcam thường
 FACE_CACHE_TTL = 30  # Seconds to cache embeddings
+FACE_DETECT_THRESHOLD = float(os.getenv('FACE_DETECT_THRESHOLD', '0.6'))
+FACE_REGISTER_DETECT_THRESHOLD = float(os.getenv('FACE_REGISTER_DETECT_THRESHOLD', '0.45'))
+FACE_MODEL_PATH = os.getenv(
+    'FACE_MODEL_PATH',
+    r'D:\PythonWorkspace\PBL5-Model\Recognition\checkpoint\MFNet.pth'
+)
 
 # Cloudinary
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '')

@@ -346,6 +346,7 @@ class FaceRegistrationAPIView(APIView):
                             image_data = image_data.split(',')[1]
 
                         image_bytes = base64.b64decode(image_data)
+                        embedding = service.extract_embedding_from_bytes(image_bytes)
                         image_url = service.upload_face_image_to_cloudinary(
                             image_bytes=image_bytes,
                             employee_id=employee.id,
@@ -353,6 +354,7 @@ class FaceRegistrationAPIView(APIView):
 
                         FaceEmbedding.objects.create(
                             employee=employee,
+                            embedding=embedding.tobytes(),
                             cloudinary_url=image_url,
                         )
                         saved_count += 1
@@ -370,6 +372,7 @@ class FaceRegistrationAPIView(APIView):
                     image_count=saved_count,
                     status='completed'
                 )
+                service.cached_embeddings = None
 
             return Response(
                 {

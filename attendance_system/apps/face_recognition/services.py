@@ -6,13 +6,9 @@ import cv2
 from django.conf import settings
 from .models import FaceEmbedding
 from apps.employees.models import Employee
-from .core.facekit.embedder_mobilefacenet_arcface import MobileFaceNetArcFaceEmbedder
-from .core.facekit.detector_resnet10 import ResNet10FaceDetector
+from .core.facekit.embedder_mobilefacenet_pytorch import MobileFaceNetTorchEmbedder
+from .core.facekit.detector_mtcnn import MTCNNFaceDetector
 from .core.facekit.vision_utils import square_crop
-
-# Define paths relative to this file
-BASE_DIR = Path(__file__).resolve().parent
-MODELS_DIR = BASE_DIR / 'core' / 'models'
 
 class FaceRecognitionService:
     _instance = None
@@ -30,23 +26,26 @@ class FaceRecognitionService:
         
         # 1. Load Detector
         try:
-            prototxt = MODELS_DIR / 'deploy.prototxt'
-            caffemodel = MODELS_DIR / 'res10_300x300_ssd_iter_140000_fp16.caffemodel'
-            
-            if prototxt.exists() and caffemodel.exists():
-                self.detector = ResNet10FaceDetector(prototxt, caffemodel)
-            else:
-                print(f"Warning: Detector models not found at {MODELS_DIR}")
+            self.detector = MTCNNFaceDetector()
         except Exception as e:
             print(f"Error loading detector: {e}")
 
         # 2. Load Embedder
         try:
-            onnx_path = MODELS_DIR / 'mobilefacenet_arcface.onnx'
-            if onnx_path.exists():
-                self.embedder = MobileFaceNetArcFaceEmbedder(onnx_path)
+            model_path = Path(
+                getattr(
+                    settings,
+                    'FACE_MODEL_PATH',
+                    r'D:\PythonWorkspace\PBL5-Model\Recognition\checkpoint\MFNet.pth',
+                )
+            )
+            if not model_path.is_absolute():
+                model_path = Path(settings.BASE_DIR) / model_path
+
+            if model_path.exists():
+                self.embedder = MobileFaceNetTorchEmbedder(model_path)
             else:
-                print(f"Warning: Embedder model not found at {MODELS_DIR}")
+                print(f"Warning: Embedder model not found at {model_path}")
         except Exception as e:
             print(f"Error loading embedder: {e}")
             
@@ -207,7 +206,8 @@ class FaceRecognitionService:
             return False, None, 0.0
 
         # 1. Detect faces
-        detections = self.detector.detect(frame, conf_threshold=0.5)
+        detect_threshold = getattr(settings, 'FACE_DETECT_THRESHOLD', 0.6)
+        detections = self.detector.detect(frame, conf_threshold=detect_threshold)
         
         if not detections:
             return False, None, 0.0

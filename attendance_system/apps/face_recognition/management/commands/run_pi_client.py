@@ -1,12 +1,9 @@
 import cv2
 import time
 import requests
-import numpy as np
-from pathlib import Path
 from django.core.management.base import BaseCommand
-from django.conf import settings
 # Use absolute imports based on app structure
-from apps.face_recognition.core.facekit.detector_resnet10 import ResNet10FaceDetector
+from apps.face_recognition.core.facekit.detector_mtcnn import MTCNNFaceDetector
 from apps.face_recognition.core.facekit.vision_utils import square_crop, draw_label
 
 class Command(BaseCommand):
@@ -24,28 +21,15 @@ class Command(BaseCommand):
         self.stdout.write(f"Server: {server_url}")
         self.stdout.write(f"Camera: {camera_idx}")
         
-        # 1. Setup paths to models
-        import apps.face_recognition
-        app_path = Path(apps.face_recognition.__file__).parent
-        models_dir = app_path / 'core' / 'models'
-        
-        prototxt = models_dir / 'deploy.prototxt'
-        caffemodel = models_dir / 'res10_300x300_ssd_iter_140000_fp16.caffemodel'
-        
-        if not prototxt.exists() or not caffemodel.exists():
-            self.stdout.write(self.style.ERROR(f"Models mismatch! Checked {models_dir}"))
-            self.stdout.write(f"Prototxt: {prototxt} ({prototxt.exists()})")
-            return
-
-        # 2. Init Local Detector
+        # 1. Init Local Detector
         self.stdout.write("Initializing local detector...")
         try:
-            detector = ResNet10FaceDetector(prototxt, caffemodel)
+            detector = MTCNNFaceDetector()
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"Failed to load detector: {e}"))
             return
         
-        # 3. Camera Loop
+        # 2. Camera Loop
         cap = cv2.VideoCapture(camera_idx)
         if not cap.isOpened():
             self.stdout.write(self.style.ERROR(f"Cannot open webcam index {camera_idx}"))
