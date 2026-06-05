@@ -10,6 +10,7 @@ from .core.facekit.embedder_mobilefacenet_arcface import MobileFaceNetArcFaceEmb
 from .core.facekit.embedder_mobilefacenet_pytorch import MobileFaceNetPyTorchEmbedder
 from .core.facekit.detector_resnet10 import ResNet10FaceDetector
 from .core.facekit.detector_scrfd import SCRFDFaceDetector
+from .core.facekit.detector_mtcnn import MTCNNArcFaceAligner
 from .core.facekit.vision_utils import square_crop
 
 # Define paths relative to this file
@@ -29,8 +30,22 @@ class FaceRecognitionService:
     def initialize(self):
         print("Initializing FaceRecognitionService...")
         self.detector = None
+        self.registration_detector = None
         self.embedder = None
         self.last_error = None
+
+        # Registration uses MTCNN landmarks and ArcFace 112x112 alignment so the
+        # crop geometry matches the MobileFaceNet checkpoint training pipeline.
+        try:
+            self.registration_detector = MTCNNArcFaceAligner(
+                image_size=getattr(settings, 'FACE_MTCNN_IMAGE_SIZE', 112),
+                output_width=getattr(settings, 'FACE_MTCNN_IMAGE_WIDTH', 96),
+                margin=getattr(settings, 'FACE_MTCNN_MARGIN', 10),
+                min_face_size=getattr(settings, 'FACE_MTCNN_MIN_FACE_SIZE', 40),
+            )
+            print("Loaded MTCNN registration detector with ArcFace landmark alignment")
+        except Exception as e:
+            print(f"Error loading MTCNN registration detector: {e}")
         
         # 1. Load Detector. Prefer SCRFD; keep ResNet10 as a fallback if the
         # SCRFD ONNX file has not been added to core/models yet.
@@ -65,12 +80,15 @@ class FaceRecognitionService:
 
         # 2. Load Embedder. Prefer the configured embedding-only PyTorch model.
         try:
-            pytorch_path = Path(getattr(settings, 'FACE_EMBEDDER_MODEL', 'lfw-bm2-backbone.pth'))
+            pytorch_path = Path(getattr(settings, 'FACE_EMBEDDER_MODEL', 'last_checkpoint.pth'))
             if not pytorch_path.is_absolute():
                 pytorch_path = PROJECT_DIR / pytorch_path
 
             if pytorch_path.exists():
-                self.embedder = MobileFaceNetPyTorchEmbedder(pytorch_path)
+                self.embedder = MobileFaceNetPyTorchEmbedder(
+                    pytorch_path,
+                    embedding_size=getattr(settings, 'FACE_EMBEDDING_SIZE', 128),
+                )
                 print(f"Loaded PyTorch embedding model: {pytorch_path}")
             else:
                 print(f"Warning: PyTorch embedding model not found at {pytorch_path}")
@@ -110,48 +128,93 @@ class FaceRecognitionService:
             arr = arr / norm
         return arr.astype(np.float32)
 
-    def _decode_face_crop(self, image_bytes):
-        """Decode raw image bytes and return the detected face crop."""
-        if self.detector is None:
-            self.initialize()
-
-        if self.detector is None:
-            raise ValueError("Face detector unavailable")
-
+    @staticmethod
+    def _decode_image_bytes(image_bytes):
         nparr = np.frombuffer(image_bytes, dtype=np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
             raise ValueError("Invalid image")
 
-        # Registration should be more tolerant than recognition matching.
-        reg_threshold = getattr(settings, 'FACE_REGISTER_DETECT_THRESHOLD', 0.45)
-        detections = self.detector.detect(frame, conf_threshold=reg_threshold)
+        return frame
 
-        # Fallback: upscale once for far-face / low-detail frames.
-        if not detections:
-            try:
-                h, w = frame.shape[:2]
-                upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
-                detections = self.detector.detect(upscaled, conf_threshold=max(0.35, reg_threshold - 0.1))
-                if detections:
-                    frame = upscaled
-            except Exception:
-                detections = []
+    def _decode_face_crop(self, image_bytes, expected_pose=None, require_pose=False):
+        """Decode raw image bytes and return an MTCNN/ArcFace aligned face."""
+        if self.registration_detector is None:
+            self.initialize()
 
-        if not detections:
-            raise ValueError("No face detected")
+        if self.registration_detector is None:
+            raise ValueError("MTCNN face detector unavailable")
 
-        best_face = max(detections, key=lambda d: d.w * d.h)
-        x1, y1, x2, y2 = best_face.as_tuple()
-        face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
+        frame = self._decode_image_bytes(image_bytes)
+        validation = self.registration_detector.validate(
+            frame,
+            expected_pose=expected_pose if require_pose else None,
+            conf_threshold=getattr(settings, 'FACE_REGISTER_DETECT_THRESHOLD', 0.9),
+            min_face_area_ratio=getattr(settings, 'FACE_REGISTER_MIN_AREA_RATIO', 0.08),
+            min_blur_score=getattr(settings, 'FACE_REGISTER_MIN_BLUR_SCORE', 60.0),
+        )
+        if not validation.is_clear or validation.face is None:
+            raise ValueError(validation.message)
 
-        if face_crop.size == 0:
-            raise ValueError("Invalid face crop")
+        face_crop = validation.face.aligned_bgr
 
         return face_crop
 
-    def upload_face_image_to_cloudinary(self, image_bytes, employee_id):
+    def validate_registration_image(self, image_bytes, expected_pose=None):
+        if self.registration_detector is None:
+            self.initialize()
+
+        if self.registration_detector is None:
+            return {
+                'is_clear': False,
+                'message': 'Bộ detect MTCNN chưa sẵn sàng',
+                'metrics': {},
+                'face_box': None,
+                'landmarks': [],
+                'frame_size': None,
+            }
+
+        frame = self._decode_image_bytes(image_bytes)
+        frame_h, frame_w = frame.shape[:2]
+        validation = self.registration_detector.validate(
+            frame,
+            expected_pose=expected_pose,
+            conf_threshold=getattr(settings, 'FACE_REGISTER_DETECT_THRESHOLD', 0.9),
+            min_face_area_ratio=getattr(settings, 'FACE_REGISTER_MIN_AREA_RATIO', 0.08),
+            min_blur_score=getattr(settings, 'FACE_REGISTER_MIN_BLUR_SCORE', 60.0),
+        )
+        face_box = None
+        landmarks = []
+        if validation.face is not None:
+            x1, y1, x2, y2 = validation.face.box
+            face_box = {
+                'x': round(x1 / max(1, frame_w), 4),
+                'y': round(y1 / max(1, frame_h), 4),
+                'width': round((x2 - x1) / max(1, frame_w), 4),
+                'height': round((y2 - y1) / max(1, frame_h), 4),
+            }
+            landmarks = [
+                {
+                    'x': round(float(point[0]) / max(1, frame_w), 4),
+                    'y': round(float(point[1]) / max(1, frame_h), 4),
+                }
+                for point in validation.face.landmarks
+            ]
+
+        return {
+            'is_clear': validation.is_clear,
+            'message': validation.message,
+            'metrics': validation.metrics,
+            'face_box': face_box,
+            'landmarks': landmarks,
+            'frame_size': {
+                'width': int(frame_w),
+                'height': int(frame_h),
+            },
+        }
+
+    def upload_face_image_to_cloudinary(self, image_bytes, employee_id, expected_pose=None):
         """Detect, crop and upload face image to Cloudinary, returning the secure URL."""
         try:
             import cloudinary
@@ -166,7 +229,7 @@ class FaceRecognitionService:
         ):
             raise ValueError("Cloudinary chưa được cấu hình đầy đủ")
 
-        face_crop = self._decode_face_crop(image_bytes)
+        face_crop = self._decode_face_crop(image_bytes, expected_pose=expected_pose, require_pose=False)
         ok, encoded = cv2.imencode('.jpg', face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         if not ok:
             raise ValueError("Không thể mã hóa ảnh khuôn mặt")
@@ -193,7 +256,7 @@ class FaceRecognitionService:
 
         return url
 
-    def extract_embedding_from_bytes(self, image_bytes):
+    def extract_embedding_from_bytes(self, image_bytes, expected_pose=None, require_pose=False):
         """Return a face embedding vector from raw image bytes."""
         if self.embedder is None:
             self.initialize()
@@ -201,10 +264,15 @@ class FaceRecognitionService:
         if self.embedder is None:
             raise ValueError("Face embedder unavailable")
 
-        face_crop = self._decode_face_crop(image_bytes)
+        face_crop = self._decode_face_crop(
+            image_bytes,
+            expected_pose=expected_pose,
+            require_pose=require_pose,
+        )
         return self.embedder.embed_face_bgr(face_crop)
 
     def _load_embeddings(self):
+        embedding_size = int(getattr(self.embedder, 'embedding_size', getattr(settings, 'FACE_EMBEDDING_SIZE', 128)))
         embeddings = (
             FaceEmbedding.objects
             .select_related('employee')
@@ -220,7 +288,7 @@ class FaceRecognitionService:
                     continue
 
                 emb_array = np.frombuffer(face.embedding, dtype=np.float32)
-                if emb_array.shape != (512,):
+                if emb_array.shape != (embedding_size,):
                     print(f"[FACE DB] Skip embedding {face.id}: invalid shape {emb_array.shape}")
                     continue
 
@@ -233,7 +301,7 @@ class FaceRecognitionService:
             self.cached_embeddings = np.vstack(emb_list).astype(np.float32)
             self.cached_labels = np.asarray(lbl_list, dtype=np.int64)
         else:
-            self.cached_embeddings = np.zeros((0, 512), dtype=np.float32)
+            self.cached_embeddings = np.zeros((0, embedding_size), dtype=np.float32)
             self.cached_labels = np.asarray([], dtype=np.int64)
 
         self.last_cache_update = time.time()
@@ -283,32 +351,41 @@ class FaceRecognitionService:
             self.last_error = "invalid_image"
             return False, None, 0.0
 
-        # 1. Detect faces. Check-in images can come from external cameras, so allow
-        # a lower threshold and one upscale fallback when requested by the caller.
+        # 1. Prefer MTCNN landmark alignment for recognition as well, so the
+        # check-in crop is geometrically consistent with registration.
         threshold = 0.5 if detect_threshold is None else detect_threshold
-        detections = self.detector.detect(frame, conf_threshold=threshold)
+        face_crop = None
 
-        if not detections and detect_threshold is not None:
-            try:
-                h, w = frame.shape[:2]
-                upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
-                detections = self.detector.detect(upscaled, conf_threshold=max(0.2, threshold - 0.1))
-                if detections:
-                    frame = upscaled
-            except Exception:
-                detections = []
-        
-        if not detections:
-            print(f"[FACE CHECK-IN] No face detected. frame_shape={frame.shape}, threshold={threshold}")
-            self.last_error = "no_face_detected"
-            return False, None, 0.0
+        if self.registration_detector is not None:
+            mtcnn_threshold = getattr(settings, 'FACE_RECOGNITION_MTCNN_THRESHOLD', 0.85)
+            faces = self.registration_detector.detect(frame, conf_threshold=mtcnn_threshold)
+            if faces:
+                face_crop = faces[0].aligned_bgr
+
+        if face_crop is None:
+            # Check-in images can come from external cameras, so allow a lower
+            # threshold and one upscale fallback when requested by the caller.
+            detections = self.detector.detect(frame, conf_threshold=threshold)
+
+            if not detections and detect_threshold is not None:
+                try:
+                    h, w = frame.shape[:2]
+                    upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+                    detections = self.detector.detect(upscaled, conf_threshold=max(0.2, threshold - 0.1))
+                    if detections:
+                        frame = upscaled
+                except Exception:
+                    detections = []
             
-        # Get largest face and crop it
-        best_face = max(detections, key=lambda d: d.w * d.h)
-        x1, y1, x2, y2 = best_face.as_tuple()
-        
-        # Use square_crop as in original logic (better for MobileFaceNet)
-        face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
+            if not detections:
+                print(f"[FACE CHECK-IN] No face detected. frame_shape={frame.shape}, threshold={threshold}")
+                self.last_error = "no_face_detected"
+                return False, None, 0.0
+                
+            best_face = max(detections, key=lambda d: d.w * d.h)
+            x1, y1, x2, y2 = best_face.as_tuple()
+            face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
+
         if face_crop.size == 0:
             print("[FACE CHECK-IN] Invalid face crop.")
             self.last_error = "invalid_face_crop"

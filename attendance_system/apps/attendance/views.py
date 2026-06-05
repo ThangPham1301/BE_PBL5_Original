@@ -68,7 +68,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         service = FaceRecognitionService()
-        found_face, employee_pk, confidence = service.process_image(image_bytes, detect_threshold=0.3)
+        found_face, employee_pk, confidence = service.process_image(image_bytes, detect_threshold=0.6)
 
         if not found_face:
             error_messages = {
@@ -103,12 +103,20 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
                 'message': 'Nhan vien khong ton tai hoac da bi vo hieu hoa.',
             }, status=status.HTTP_404_NOT_FOUND)
 
+        employee_name = employee.user.get_full_name() or employee.user.username
+        print(
+            f"[ATTENDANCE CHECK-IN] employee_code={employee.employee_id} "
+            f"employee_name={employee_name} confidence={confidence:.4f}"
+        )
+
         log, duplicate_response = self._create_check_in_log(employee)
         if duplicate_response:
             return duplicate_response
 
         data = dict(AttendanceLogDetailSerializer(log).data)
         data['confidence'] = confidence
+        data['employee_code'] = employee.employee_id
+        data['employee_name'] = employee_name
 
         return Response({
             'success': True,

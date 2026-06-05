@@ -49,6 +49,7 @@ class FaceRegisterRequestSerializer(serializers.Serializer):
 
 class FaceValidateRequestSerializer(serializers.Serializer):
     image = serializers.CharField()
+    pose = serializers.ChoiceField(choices=DEFAULT_FACE_POSES, required=False)
 
     def validate_image(self, value):
         if not value:

@@ -7,8 +7,6 @@ from django.utils import timezone
 from django.core.files.base import ContentFile
 from datetime import timedelta
 import base64
-import numpy as np
-import cv2
 from django.db import transaction
 
 from apps.employees.models import Employee
@@ -29,6 +27,7 @@ class FaceValidateAPIView(APIView):
                 {
                     'success': False,
                     'is_clear': False,
+                    'can_capture': False,
                     'message': 'Dữ liệu không hợp lệ',
                     'errors': serializer.errors,
                 },
@@ -39,102 +38,24 @@ class FaceValidateAPIView(APIView):
 
         try:
             if ',' in image_data:
-                image_data = image_data.split(',')[1]
+                image_data = image_data.split(',', 1)[1]
 
-            image_bytes = base64.b64decode(image_data)
-            nparr = np.frombuffer(image_bytes, dtype=np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            if frame is None:
-                return Response(
-                    {
-                        'success': True,
-                        'is_clear': False,
-                        'message': 'Ảnh không hợp lệ, vui lòng giữ máy ổn định.',
-                    }
-                )
-
+            image_bytes = base64.b64decode(image_data, validate=True)
             service = FaceRecognitionService()
-            if service.detector is None:
-                service.initialize()
-
-            if service.detector is None:
-                return Response(
-                    {
-                        'success': False,
-                        'is_clear': False,
-                        'message': 'Bộ nhận diện khuôn mặt chưa sẵn sàng',
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-
-            detections = service.detector.detect(frame, conf_threshold=0.45)
-            if not detections:
-                return Response(
-                    {
-                        'success': True,
-                        'is_clear': False,
-                        'message': 'Chưa thấy khuôn mặt rõ trong khung.',
-                    }
-                )
-
-            best_face = max(detections, key=lambda d: d.w * d.h)
-            face_area = float(best_face.w * best_face.h)
-            frame_area = float(frame.shape[0] * frame.shape[1])
-            area_ratio = face_area / frame_area if frame_area > 0 else 0.0
-
-            x1, y1, x2, y2 = best_face.as_tuple()
-            face_crop = frame[max(y1, 0):max(y2, 0), max(x1, 0):max(x2, 0)]
-            if face_crop.size == 0:
-                return Response(
-                    {
-                        'success': True,
-                        'is_clear': False,
-                        'message': 'Không crop được khuôn mặt, vui lòng thử lại.',
-                    }
-                )
-
-            gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-            blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-            min_face_area_ratio = 0.08
-            min_blur_score = 60.0
-
-            if area_ratio < min_face_area_ratio:
-                return Response(
-                    {
-                        'success': True,
-                        'is_clear': False,
-                        'message': 'Khuôn mặt còn nhỏ, vui lòng đưa camera lại gần hơn.',
-                        'metrics': {
-                            'face_area_ratio': round(area_ratio, 4),
-                            'blur_score': round(blur_score, 2),
-                        },
-                    }
-                )
-
-            if blur_score < min_blur_score:
-                return Response(
-                    {
-                        'success': True,
-                        'is_clear': False,
-                        'message': 'Ảnh bị mờ, vui lòng giữ yên vài giây và đủ sáng.',
-                        'metrics': {
-                            'face_area_ratio': round(area_ratio, 4),
-                            'blur_score': round(blur_score, 2),
-                        },
-                    }
-                )
-
+            validation = service.validate_registration_image(
+                image_bytes,
+                expected_pose=serializer.validated_data.get('pose'),
+            )
             return Response(
                 {
                     'success': True,
-                    'is_clear': True,
-                    'message': 'Khuôn mặt rõ, có thể chụp.',
-                    'metrics': {
-                        'face_area_ratio': round(area_ratio, 4),
-                        'blur_score': round(blur_score, 2),
-                    },
+                    'is_clear': validation['is_clear'],
+                    'can_capture': validation['is_clear'],
+                    'message': validation['message'],
+                    'metrics': validation['metrics'],
+                    'face_box': validation['face_box'],
+                    'landmarks': validation['landmarks'],
+                    'frame_size': validation['frame_size'],
                 }
             )
 
@@ -143,6 +64,7 @@ class FaceValidateAPIView(APIView):
                 {
                     'success': False,
                     'is_clear': False,
+                    'can_capture': False,
                     'message': f'Lỗi kiểm tra ảnh: {str(e)}',
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -175,73 +97,75 @@ class RecognizeAPIView(APIView):
                  }, status=status.HTTP_400_BAD_REQUEST)
                  
             if employee_id:
-                 employee = Employee.objects.get(pk=employee_id)
-                 
-                 # 1. Create Face Recognition Log (History)
-                 # Save image to log (optional, but good for history)
-                 log_entry = FaceLog.objects.create(
-                     employee=employee,
-                     confidence=confidence,
-                     image=ContentFile(image_bytes, name=f"{employee.id}_{timezone.now().timestamp()}.jpg")
-                 )
-                 
-                 # 2. Process Attendance (Debounce based on last check-out)
-                 today = timezone.localdate()
-                 now = timezone.now()
-                 
-                 attendance_log, created = AttendanceLog.objects.get_or_create(
-                     employee=employee,
-                     date=today,
-                     defaults={
-                         'check_in': now,
-                         'status': AttendanceLog.Status.PRESENT
-                     }
-                 )
-                 
-                 attendance_msg = "Đã điểm danh"
-                 
-                 if created:
-                     attendance_msg = "Check-in thành công (Mới)"
-                 else:
-                     updated_fields = []
-                     # Helper to check if we should update based on debounce time
-                     # Debounce: 5 minutes
-                     DEBOUNCE_TIME = timedelta(minutes=5)
-                     
-                     # 1. If check-in is missing (rare case), fill it
-                     if not attendance_log.check_in:
-                         attendance_log.check_in = now
-                         updated_fields.append('check_in')
-                         attendance_msg = "Cập nhật giờ vào"
-                     
-                     # 2. Update Check-out (Last In - Last Out strategy)
-                     # Only update if check_out is None OR it's been > 5 mins since last check_out
-                     last_checkout = attendance_log.check_out
-                     if not last_checkout or (now - last_checkout > DEBOUNCE_TIME):
-                         attendance_log.check_out = now
-                         updated_fields.append('check_out')
-                         attendance_msg = "Cập nhật giờ ra"
-                     else:
-                         attendance_msg = "Đã ghi nhận (Debounce)"
+                employee = Employee.objects.get(pk=employee_id)
+                employee_name = employee.user.get_full_name() or employee.user.username
+                print(
+                    f"[FACE CHECK-IN] employee_code={employee.employee_id} "
+                    f"employee_name={employee_name} confidence={confidence:.4f}"
+                )
 
-                     if updated_fields:
-                         attendance_log.save(update_fields=updated_fields)
+                # 1. Create Face Recognition Log (History)
+                # Save image to log (optional, but good for history)
+                log_entry = FaceLog.objects.create(
+                    employee=employee,
+                    confidence=confidence,
+                    image=ContentFile(image_bytes, name=f"{employee.id}_{timezone.now().timestamp()}.jpg")
+                )
 
-                 return Response({
-                     'success': True,
-                     'identified': True,
-                     'employee_id': employee.id,
-                     'name': str(employee),
-                     'confidence': confidence,
-                     'attendance_message': attendance_msg
-                 })
+                # 2. Process Attendance (Debounce based on last check-out)
+                today = timezone.localdate()
+                now = timezone.now()
+
+                attendance_log, created = AttendanceLog.objects.get_or_create(
+                    employee=employee,
+                    date=today,
+                    defaults={
+                        'check_in': now,
+                        'status': AttendanceLog.Status.PRESENT
+                    }
+                )
+
+                attendance_msg = "Da diem danh"
+
+                if created:
+                    attendance_msg = "Check-in thanh cong (Moi)"
+                else:
+                    updated_fields = []
+                    DEBOUNCE_TIME = timedelta(minutes=5)
+
+                    if not attendance_log.check_in:
+                        attendance_log.check_in = now
+                        updated_fields.append('check_in')
+                        attendance_msg = "Cap nhat gio vao"
+
+                    last_checkout = attendance_log.check_out
+                    if not last_checkout or (now - last_checkout > DEBOUNCE_TIME):
+                        attendance_log.check_out = now
+                        updated_fields.append('check_out')
+                        attendance_msg = "Cap nhat gio ra"
+                    else:
+                        attendance_msg = "Da ghi nhan (Debounce)"
+
+                    if updated_fields:
+                        attendance_log.save(update_fields=updated_fields)
+
+                return Response({
+                    'success': True,
+                    'identified': True,
+                    'employee_id': employee.id,
+                    'employee_code': employee.employee_id,
+                    'employee_name': employee_name,
+                    'name': str(employee),
+                    'confidence': confidence,
+                    'attendance_message': attendance_msg,
+                })
             else:
-                 return Response({
-                     'success': True,
-                     'identified': False,
-                     'message': 'Face detected but not recognized.',
-                     'confidence': confidence
-                 })
+                return Response({
+                    'success': True,
+                    'identified': False,
+                    'message': 'Face detected but not recognized.',
+                    'confidence': confidence,
+                })
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -409,7 +333,7 @@ class FaceRegistrationAPIView(APIView):
             return Response(
                 {
                     'success': False,
-                    'message': 'Du lieu khong hop le',
+                    'message': 'Dữ liệu không hợp lệ',
                     'errors': serializer.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -429,7 +353,7 @@ class FaceRegistrationAPIView(APIView):
             return Response(
                 {
                     'success': False,
-                    'message': f'Khong tim thay nhan vien cho user_id={user_id}',
+                    'message': f'Không tìm thấy nhân viên cho user_id={user_id}',
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -457,7 +381,11 @@ class FaceRegistrationAPIView(APIView):
                             image_data = image_data.split(',', 1)[1]
 
                         image_bytes = base64.b64decode(image_data, validate=True)
-                        embedding = service.extract_embedding_from_bytes(image_bytes)
+                        embedding = service.extract_embedding_from_bytes(
+                            image_bytes,
+                            expected_pose=poses[idx],
+                            require_pose=True,
+                        )
                         embedding = service._normalize_embedding(embedding)
 
                         image_url = None
@@ -465,6 +393,7 @@ class FaceRegistrationAPIView(APIView):
                             image_url = service.upload_face_image_to_cloudinary(
                                 image_bytes=image_bytes,
                                 employee_id=employee.id,
+                                expected_pose=poses[idx],
                             )
                         except Exception as upload_error:
                             print(f"[FACE REGISTRATION WARN] Cloudinary skipped for image {idx + 1}: {upload_error}")
@@ -486,7 +415,7 @@ class FaceRegistrationAPIView(APIView):
                         continue
 
                 if saved_count != 5:
-                    raise ValueError(f'Chi luu duoc {saved_count}/5 anh hop le. Vui long dang ky lai.')
+                    raise ValueError(f'Chỉ lưu được {saved_count}/5 ảnh hợp lệ. Vui lòng đăng ký lại.')
 
                 registration.image_count = saved_count
                 registration.status = 'completed'
@@ -496,7 +425,7 @@ class FaceRegistrationAPIView(APIView):
             return Response(
                 {
                     'success': True,
-                    'message': 'Da dang ky khuon mat va luu embedding thanh cong',
+                    'message': 'Đã đăng ký khuôn mặt và lưu embedding thành công',
                     'registration_id': registration.id,
                     'employee_id': employee.id,
                     'employee_code': employee.employee_id,
@@ -520,7 +449,7 @@ class FaceRegistrationAPIView(APIView):
             return Response(
                 {
                     'success': False,
-                    'message': f'Loi xu ly dang ky: {exc}',
+                    'message': f'Lỗi xử lý đăng ký: {exc}',
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
