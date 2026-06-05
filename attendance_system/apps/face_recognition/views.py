@@ -3,12 +3,10 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
-from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.files.base import ContentFile
 from datetime import timedelta
 import base64
-import json
 import numpy as np
 import cv2
 from django.db import transaction
@@ -399,3 +397,130 @@ class FaceRegistrationAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+class FaceRegistrationAPIView(APIView):
+    """Register 5 face angles and persist embeddings with employee metadata."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = FaceRegisterRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Du lieu khong hop le',
+                    'errors': serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_id = serializer.validated_data['user_id']
+        images = serializer.validated_data['images']
+        poses = serializer.validated_data['poses']
+        service = FaceRecognitionService()
+
+        try:
+            try:
+                employee = Employee.objects.get(pk=user_id)
+            except Employee.DoesNotExist:
+                employee = Employee.objects.get(employee_id=user_id)
+        except Employee.DoesNotExist:
+            return Response(
+                {
+                    'success': False,
+                    'message': f'Khong tim thay nhan vien cho user_id={user_id}',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        employee_name = employee.user.get_full_name() or employee.user.username
+
+        try:
+            saved_count = 0
+            with transaction.atomic():
+                FaceEmbedding.objects.filter(employee=employee).delete()
+                FaceRegistration.objects.filter(user_id=str(user_id)).delete()
+
+                registration = FaceRegistration.objects.create(
+                    user_id=user_id,
+                    employee=employee,
+                    employee_code=employee.employee_id,
+                    employee_name=employee_name,
+                    image_count=0,
+                    status='pending',
+                )
+
+                for idx, image_data in enumerate(images):
+                    try:
+                        if ',' in image_data:
+                            image_data = image_data.split(',', 1)[1]
+
+                        image_bytes = base64.b64decode(image_data, validate=True)
+                        embedding = service.extract_embedding_from_bytes(image_bytes)
+                        embedding = service._normalize_embedding(embedding)
+
+                        image_url = None
+                        try:
+                            image_url = service.upload_face_image_to_cloudinary(
+                                image_bytes=image_bytes,
+                                employee_id=employee.id,
+                            )
+                        except Exception as upload_error:
+                            print(f"[FACE REGISTRATION WARN] Cloudinary skipped for image {idx + 1}: {upload_error}")
+
+                        FaceEmbedding.objects.create(
+                            employee=employee,
+                            registration=registration,
+                            pose=poses[idx],
+                            embedding=embedding.tobytes(),
+                            employee_code_snapshot=employee.employee_id,
+                            employee_name_snapshot=employee_name,
+                            cloudinary_url=image_url,
+                        )
+                        saved_count += 1
+                        print(f"[FACE REGISTRATION] Saved embedding {idx + 1}/5 pose={poses[idx]} employee={employee.employee_id}")
+
+                    except Exception as exc:
+                        print(f"[FACE REGISTRATION ERROR] Image {idx + 1} pose={poses[idx]} failed: {exc}")
+                        continue
+
+                if saved_count != 5:
+                    raise ValueError(f'Chi luu duoc {saved_count}/5 anh hop le. Vui long dang ky lai.')
+
+                registration.image_count = saved_count
+                registration.status = 'completed'
+                registration.save(update_fields=['image_count', 'status', 'updated_at'])
+                service.invalidate_cache()
+
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Da dang ky khuon mat va luu embedding thanh cong',
+                    'registration_id': registration.id,
+                    'employee_id': employee.id,
+                    'employee_code': employee.employee_id,
+                    'employee_name': employee_name,
+                    'image_count': registration.image_count,
+                    'poses': poses,
+                    'status': registration.status,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        except ValueError as exc:
+            return Response(
+                {
+                    'success': False,
+                    'message': str(exc),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as exc:
+            return Response(
+                {
+                    'success': False,
+                    'message': f'Loi xu ly dang ky: {exc}',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

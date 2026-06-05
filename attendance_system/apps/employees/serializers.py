@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.utils import timezone
 from apps.accounts.serializers import UserSerializer, UserCreateSerializer
 from .models import Department, Employee
 
@@ -62,6 +63,13 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
 
 class EmployeeCreateSerializer(serializers.ModelSerializer):
     user = UserCreateSerializer()
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    position = serializers.CharField(required=False, allow_blank=True, default='')
+    date_joined = serializers.DateField(required=False, default=timezone.localdate)
 
     class Meta:
         model = Employee
@@ -72,6 +80,7 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         user_data = validated_data.pop('user')
+        validated_data['date_joined'] = timezone.localdate()
         user_serializer = UserCreateSerializer(data=user_data)
         user_serializer.is_valid(raise_exception=True)
         user = user_serializer.save()
@@ -80,6 +89,13 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 
 
 class EmployeeUpdateSerializer(serializers.ModelSerializer):
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    position = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = Employee
         fields = [

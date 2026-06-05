@@ -1,28 +1,31 @@
-from datetime import datetime, date, timedelta
+import base64
+from datetime import datetime, timedelta
 
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from apps.accounts.permissions import IsAuthenticated, IsAdminOrManager
+from apps.accounts.permissions import IsAuthenticated
 from apps.employees.models import Employee
+from apps.face_recognition.services import FaceRecognitionService
 from apps.shifts.models import EmployeeShift
+from .filters import AttendanceLogFilter
 from .models import AttendanceLog
 from .serializers import (
-    AttendanceLogListSerializer,
     AttendanceLogDetailSerializer,
-    CheckInSerializer,
+    AttendanceLogListSerializer,
     CheckOutSerializer,
 )
-from .filters import AttendanceLogFilter
 
 
 class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Attendance management.
-    - list / retrieve: view attendance logs (filtered)
-    - check-in / check-out: custom actions
+    - list / retrieve: view attendance logs
+    - check-in: public face check-in by image
+    - check-out: check-out by employee code
     - today: attendance for today
     """
     queryset = AttendanceLog.objects.select_related(
@@ -37,6 +40,8 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
         return AttendanceLogListSerializer
 
     def get_permissions(self):
+        if self.action == 'check_in':
+            return [AllowAny()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
@@ -52,51 +57,65 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
                 qs = qs.none()
         return qs
 
-    # ─── Check-in ────────────────────────────────────────
     @action(detail=False, methods=['post'], url_path='check-in')
     def check_in(self, request):
-        serializer = CheckInSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        employee_code = serializer.validated_data['employee_id']
+        image_bytes = self._extract_image_bytes(request)
+        if image_bytes is None:
+            return Response({
+                'success': False,
+                'data': None,
+                'message': 'Vui long gui anh khuon mat qua field image, file hoac photo.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        service = FaceRecognitionService()
+        found_face, employee_pk, confidence = service.process_image(image_bytes, detect_threshold=0.3)
+
+        if not found_face:
+            error_messages = {
+                'invalid_image': 'Anh gui len khong decode duoc. Hay gui file jpg/png hoac base64 anh hop le.',
+                'no_face_detected': 'Khong phat hien khuon mat trong anh. Hay chup ro mat, du sang va gan camera hon.',
+                'invalid_face_crop': 'Khong crop duoc khuon mat tu anh. Hay thu lai voi anh ro hon.',
+                'models_unavailable': 'Model nhan dien khuon mat chua san sang.',
+            }
+            error_code = getattr(service, 'last_error', None)
+            return Response({
+                'success': False,
+                'data': {'error_code': error_code},
+                'message': error_messages.get(error_code, 'Khong phat hien khuon mat trong anh.'),
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not employee_pk:
+            return Response({
+                'success': False,
+                'data': {
+                    'confidence': confidence,
+                    'error_code': 'employee_not_recognized',
+                },
+                'message': 'Co khuon mat nhung khong khop voi nhan vien nao trong du lieu dang ky.',
+            }, status=status.HTTP_200_OK)
 
         try:
-            employee = Employee.objects.get(employee_id=employee_code, is_active=True)
+            employee = Employee.objects.get(pk=employee_pk, is_active=True)
         except Employee.DoesNotExist:
             return Response({
-                'success': False, 'data': None,
-                'message': 'Nhân viên không tồn tại hoặc đã bị vô hiệu hóa.',
+                'success': False,
+                'data': None,
+                'message': 'Nhan vien khong ton tai hoac da bi vo hieu hoa.',
             }, status=status.HTTP_404_NOT_FOUND)
 
-        today = timezone.localdate()
-        now = timezone.now()
+        log, duplicate_response = self._create_check_in_log(employee)
+        if duplicate_response:
+            return duplicate_response
 
-        # Prevent duplicate check-in
-        log, created = AttendanceLog.objects.get_or_create(
-            employee=employee,
-            date=today,
-            defaults={'check_in': now, 'status': AttendanceLog.Status.PRESENT},
-        )
-        if not created:
-            if log.check_in:
-                return Response({
-                    'success': False, 'data': None,
-                    'message': 'Nhân viên đã check-in hôm nay rồi.',
-                }, status=status.HTTP_400_BAD_REQUEST)
-            log.check_in = now
-            log.save(update_fields=['check_in'])
-
-        # Determine status based on shift + late_threshold
-        attendance_status = self._compute_status(employee, now, today)
-        log.status = attendance_status
-        log.save(update_fields=['status'])
+        data = dict(AttendanceLogDetailSerializer(log).data)
+        data['confidence'] = confidence
 
         return Response({
             'success': True,
-            'data': AttendanceLogDetailSerializer(log).data,
-            'message': 'Check-in thành công.',
+            'data': data,
+            'message': 'Check-in thanh cong.',
         })
 
-    # ─── Check-out ───────────────────────────────────────
     @action(detail=False, methods=['post'], url_path='check-out')
     def check_out(self, request):
         serializer = CheckOutSerializer(data=request.data)
@@ -107,8 +126,9 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             employee = Employee.objects.get(employee_id=employee_code, is_active=True)
         except Employee.DoesNotExist:
             return Response({
-                'success': False, 'data': None,
-                'message': 'Nhân viên không tồn tại hoặc đã bị vô hiệu hóa.',
+                'success': False,
+                'data': None,
+                'message': 'Nhan vien khong ton tai hoac da bi vo hieu hoa.',
             }, status=status.HTTP_404_NOT_FOUND)
 
         today = timezone.localdate()
@@ -118,14 +138,16 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             log = AttendanceLog.objects.get(employee=employee, date=today)
         except AttendanceLog.DoesNotExist:
             return Response({
-                'success': False, 'data': None,
-                'message': 'Nhân viên chưa check-in hôm nay.',
+                'success': False,
+                'data': None,
+                'message': 'Nhan vien chua check-in hom nay.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if log.check_out:
             return Response({
-                'success': False, 'data': None,
-                'message': 'Nhân viên đã check-out hôm nay rồi.',
+                'success': False,
+                'data': None,
+                'message': 'Nhan vien da check-out hom nay roi.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         log.check_out = now
@@ -134,10 +156,9 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             'success': True,
             'data': AttendanceLogDetailSerializer(log).data,
-            'message': 'Check-out thành công.',
+            'message': 'Check-out thanh cong.',
         })
 
-    # ─── Today ───────────────────────────────────────────
     @action(detail=False, methods=['get'], url_path='today')
     def today(self, request):
         today = timezone.localdate()
@@ -146,6 +167,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
         if page is not None:
             serializer = AttendanceLogListSerializer(page, many=True)
             return self.get_paginated_response(serializer.data)
+
         serializer = AttendanceLogListSerializer(qs, many=True)
         return Response({
             'success': True,
@@ -153,14 +175,66 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             'message': '',
         })
 
-    # ─── Helper ──────────────────────────────────────────
+    def _create_check_in_log(self, employee):
+        today = timezone.localdate()
+        now = timezone.now()
+
+        log, created = AttendanceLog.objects.get_or_create(
+            employee=employee,
+            date=today,
+            defaults={'check_in': now, 'status': AttendanceLog.Status.PRESENT},
+        )
+
+        if not created:
+            if log.check_in:
+                return None, Response({
+                    'success': False,
+                    'data': None,
+                    'message': 'Nhan vien da check-in hom nay roi.',
+                }, status=status.HTTP_400_BAD_REQUEST)
+            log.check_in = now
+            log.save(update_fields=['check_in'])
+
+        attendance_status = self._compute_status(employee, now, today)
+        log.status = attendance_status
+        log.save(update_fields=['status'])
+
+        return log, None
+
+    @staticmethod
+    def _extract_image_bytes(request):
+        image_file = (
+            request.FILES.get('image')
+            or request.FILES.get('file')
+            or request.FILES.get('photo')
+        )
+        if image_file:
+            return image_file.read()
+
+        image_data = (
+            request.data.get('image')
+            or request.data.get('file')
+            or request.data.get('photo')
+        )
+        if not image_data:
+            return None
+
+        if hasattr(image_data, 'read'):
+            return image_data.read()
+
+        if isinstance(image_data, str):
+            try:
+                image_data = image_data.strip()
+                if ',' in image_data:
+                    image_data = image_data.split(',', 1)[1]
+                return base64.b64decode(image_data, validate=True)
+            except Exception:
+                return None
+
+        return None
+
     @staticmethod
     def _compute_status(employee, check_in_time, today):
-        """
-        Compare check-in time with the employee's shift start_time + late_threshold.
-        Returns 'present' or 'late'.
-        """
-        # Get the latest applicable shift for this employee
         emp_shift = (
             EmployeeShift.objects
             .filter(employee=employee, effective_date__lte=today)
@@ -169,14 +243,15 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             .first()
         )
         if not emp_shift:
-            return AttendanceLog.Status.PRESENT  # no shift assigned → present
+            return AttendanceLog.Status.PRESENT
 
         shift = emp_shift.shift
-        # Build a datetime for shift start on today
-        shift_start_dt = timezone.make_aware(
-            datetime.combine(today, shift.start_time)
-        ) if timezone.is_naive(datetime.combine(today, shift.start_time)) else datetime.combine(today, shift.start_time)
-
+        shift_start = datetime.combine(today, shift.start_time)
+        shift_start_dt = (
+            timezone.make_aware(shift_start)
+            if timezone.is_naive(shift_start)
+            else shift_start
+        )
         threshold_dt = shift_start_dt + timedelta(minutes=shift.late_threshold)
 
         if check_in_time > threshold_dt:

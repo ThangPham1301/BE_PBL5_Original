@@ -82,16 +82,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
+        'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
         'NAME': os.getenv('DB_NAME', 'attendance_db'),
-        'USER': os.getenv('DB_USER', 'root'),
+        'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', '127.0.0.1'),
-        'PORT': os.getenv('DB_PORT', '3306'),
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
 
@@ -155,7 +151,9 @@ SIMPLE_JWT = {
 # Face Recognition Settings
 FACE_MATCH_THRESHOLD = 0.35  # Giảm xuống 0.35 để dễ nhận diện hơn với Webcam thường
 FACE_CACHE_TTL = 30  # Seconds to cache embeddings
-
+FACE_DETECTOR_MODEL = os.getenv('FACE_DETECTOR_MODEL', 'scrfd_2.5g_bnkps.onnx')
+FACE_EMBEDDER_MODEL = os.getenv('FACE_EMBEDDER_MODEL', 'lfw-bm2-backbone.pth')
+FACE_SCRFD_INPUT_SIZE = int(os.getenv('FACE_SCRFD_INPUT_SIZE', '640'))
 # Cloudinary
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '')
 CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY', '')

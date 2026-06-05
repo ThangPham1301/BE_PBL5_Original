@@ -4,9 +4,16 @@ djangorestframework-simplejwt==5.3.*
 django-filter==23.5
 django-cors-headers==4.3.*
 mysqlclient==2.2.*
+psycopg2-binary==2.9.*
 python-dotenv==1.0.*
 openpyxl==3.1.*
 celery==5.3.*
 redis==5.0.*
 Pillow==10.2.*
 cloudinary==1.41.*
+numpy==1.26.*
+opencv-python==4.9.*
+requests==2.31.*
+mysql-connector-python==8.3.*
+onnxruntime==1.17.*
+torch==2.3.*
