@@ -34,7 +34,7 @@ def refresh_view(request):
         return Response({
             'success': False,
             'data': None,
-            'message': 'Refresh token is required.',
+            'message': 'Thiếu mã làm mới phiên đăng nhập.',
         }, status=status.HTTP_400_BAD_REQUEST)
     try:
         refresh = RefreshToken(refresh_token)
@@ -43,13 +43,13 @@ def refresh_view(request):
             'data': {
                 'access': str(refresh.access_token),
             },
-            'message': 'Token refreshed successfully.',
+            'message': 'Đã làm mới phiên đăng nhập thành công.',
         })
     except Exception:
         return Response({
             'success': False,
             'data': None,
-            'message': 'Invalid refresh token.',
+            'message': 'Mã làm mới phiên đăng nhập không hợp lệ.',
         }, status=status.HTTP_401_UNAUTHORIZED)
 
 
@@ -70,5 +70,5 @@ def logout_view(request):
         return Response({
             'success': False,
             'data': None,
-            'message': 'Invalid token.',
+            'message': 'Mã phiên đăng nhập không hợp lệ.',
         }, status=status.HTTP_400_BAD_REQUEST)

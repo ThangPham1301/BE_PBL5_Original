@@ -81,7 +81,7 @@ class RecognizeAPIView(APIView):
 
     def post(self, request, *args, **kwargs):
         if 'file' not in request.data:
-             return Response({'error': 'No file uploaded'}, status=status.HTTP_400_BAD_REQUEST)
+             return Response({'error': 'Chưa tải ảnh lên.'}, status=status.HTTP_400_BAD_REQUEST)
 
         file_obj = request.data['file']
         
@@ -93,7 +93,7 @@ class RecognizeAPIView(APIView):
             if not found_face:
                  return Response({
                      'success': False,
-                     'message': 'No face detected in the image.'
+                     'message': 'Không phát hiện khuôn mặt trong ảnh.'
                  }, status=status.HTTP_400_BAD_REQUEST)
                  
             if employee_id:
@@ -125,10 +125,10 @@ class RecognizeAPIView(APIView):
                     }
                 )
 
-                attendance_msg = "Da diem danh"
+                attendance_msg = "Đã chấm công"
 
                 if created:
-                    attendance_msg = "Check-in thanh cong (Moi)"
+                    attendance_msg = "Chấm công vào thành công (mới)"
                 else:
                     updated_fields = []
                     DEBOUNCE_TIME = timedelta(minutes=5)
@@ -136,15 +136,15 @@ class RecognizeAPIView(APIView):
                     if not attendance_log.check_in:
                         attendance_log.check_in = now
                         updated_fields.append('check_in')
-                        attendance_msg = "Cap nhat gio vao"
+                        attendance_msg = "Đã cập nhật giờ vào"
 
                     last_checkout = attendance_log.check_out
                     if not last_checkout or (now - last_checkout > DEBOUNCE_TIME):
                         attendance_log.check_out = now
                         updated_fields.append('check_out')
-                        attendance_msg = "Cap nhat gio ra"
+                        attendance_msg = "Đã cập nhật giờ ra"
                     else:
-                        attendance_msg = "Da ghi nhan (Debounce)"
+                        attendance_msg = "Đã ghi nhận"
 
                     if updated_fields:
                         attendance_log.save(update_fields=updated_fields)
@@ -163,7 +163,7 @@ class RecognizeAPIView(APIView):
                 return Response({
                     'success': True,
                     'identified': False,
-                    'message': 'Face detected but not recognized.',
+                    'message': 'Đã phát hiện khuôn mặt nhưng không nhận diện được.',
                     'confidence': confidence,
                 })
         except Exception as e:
@@ -181,10 +181,10 @@ class EnrollAPIView(APIView):
     def post(self, request, *args, **kwargs):
         employee_id = request.data.get('employee_id')
         if not employee_id:
-            return Response({'error': 'employee_id required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Thiếu mã nhân viên.'}, status=status.HTTP_400_BAD_REQUEST)
             
         if 'file' not in request.data:
-             return Response({'error': 'No file uploaded'}, status=status.HTTP_400_BAD_REQUEST)
+             return Response({'error': 'Chưa tải ảnh lên.'}, status=status.HTTP_400_BAD_REQUEST)
              
         try:
             file_obj = request.data['file']
@@ -193,7 +193,10 @@ class EnrollAPIView(APIView):
             service = FaceRecognitionService()
             service.enroll_face(image_bytes, employee_id)
             
-            return Response({'success': True, 'message': f'Face enrolled for employee {employee_id}'})
+            return Response({
+                'success': True,
+                'message': f'Đã đăng ký khuôn mặt cho nhân viên {employee_id}.',
+            })
             
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

@@ -134,7 +134,7 @@ class FaceRecognitionService:
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            raise ValueError("Invalid image")
+            raise ValueError("Ảnh không hợp lệ.")
 
         return frame
 
@@ -144,7 +144,7 @@ class FaceRecognitionService:
             self.initialize()
 
         if self.registration_detector is None:
-            raise ValueError("MTCNN face detector unavailable")
+            raise ValueError("Bộ phát hiện khuôn mặt MTCNN chưa sẵn sàng.")
 
         frame = self._decode_image_bytes(image_bytes)
         validation = self.registration_detector.validate(
@@ -220,7 +220,7 @@ class FaceRecognitionService:
             import cloudinary
             import cloudinary.uploader
         except Exception as exc:
-            raise ValueError(f"Cloudinary package not available: {exc}")
+            raise ValueError(f"Gói Cloudinary chưa sẵn sàng: {exc}")
 
         if not (
             settings.CLOUDINARY_CLOUD_NAME
@@ -262,7 +262,7 @@ class FaceRecognitionService:
             self.initialize()
 
         if self.embedder is None:
-            raise ValueError("Face embedder unavailable")
+            raise ValueError("Bộ trích xuất đặc trưng khuôn mặt chưa sẵn sàng.")
 
         face_crop = self._decode_face_crop(
             image_bytes,
@@ -407,7 +407,7 @@ class FaceRecognitionService:
         try:
             emp = Employee.objects.get(pk=employee_id)
         except Employee.DoesNotExist:
-            raise ValueError(f"Employee {employee_id} not found")
+            raise ValueError(f"Không tìm thấy nhân viên {employee_id}.")
 
         employee_name = emp.user.get_full_name() or emp.user.username
         embedding = self._normalize_embedding(embedding)

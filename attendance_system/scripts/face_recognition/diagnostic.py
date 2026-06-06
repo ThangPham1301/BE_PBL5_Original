@@ -6,7 +6,12 @@ Kiểm tra tất cả components có hoạt động đúng không
 
 import os
 import sys
+from pathlib import Path
+
 import django
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 # Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.base')

@@ -85,6 +85,15 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
         user_serializer.is_valid(raise_exception=True)
         user = user_serializer.save()
         employee = Employee.objects.create(user=user, **validated_data)
+        if user.role == 'employee':
+            from apps.shifts.defaults import get_or_create_default_shift
+            from apps.shifts.models import EmployeeShift
+
+            EmployeeShift.objects.create(
+                employee=employee,
+                shift=get_or_create_default_shift(),
+                effective_date=employee.date_joined,
+            )
         return employee
 
 

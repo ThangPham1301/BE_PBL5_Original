@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -5,7 +6,7 @@ from rest_framework.response import Response
 from apps.accounts.permissions import IsAdmin, IsAdminOrManager, IsAuthenticated
 from apps.employees.models import Employee
 from .models import Shift, EmployeeShift
-from .serializers import ShiftSerializer, EmployeeShiftSerializer, AssignShiftSerializer
+from .serializers import AssignShiftSerializer, EmployeeShiftSerializer, MyShiftSerializer, ShiftSerializer
 
 
 class ShiftViewSet(viewsets.ModelViewSet):
@@ -15,7 +16,40 @@ class ShiftViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdmin()]
+        if self.action == 'assign':
+            return [IsAdminOrManager()]
         return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get'], url_path='my')
+    def my_shift(self, request):
+        try:
+            employee = request.user.employee
+        except Employee.DoesNotExist:
+            return Response({
+                'success': False,
+                'data': None,
+                'message': 'Tài khoản chưa được liên kết với nhân viên.',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        assignment = (
+            EmployeeShift.objects
+            .filter(employee=employee, effective_date__lte=timezone.localdate())
+            .select_related('shift')
+            .order_by('-effective_date', '-id')
+            .first()
+        )
+        if not assignment:
+            return Response({
+                'success': True,
+                'data': None,
+                'message': 'Nhân viên chưa được gán ca làm việc.',
+            })
+
+        return Response({
+            'success': True,
+            'data': MyShiftSerializer(assignment.shift).data,
+            'message': '',
+        })
 
     @action(detail=False, methods=['post'], url_path='assign')
     def assign(self, request):

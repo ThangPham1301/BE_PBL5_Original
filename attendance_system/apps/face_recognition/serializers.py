@@ -41,9 +41,9 @@ class FaceRegisterRequestSerializer(serializers.Serializer):
         attrs = super().validate(attrs)
         attrs['poses'] = attrs.get('poses') or DEFAULT_FACE_POSES
         if len(attrs['images']) != 5:
-            raise serializers.ValidationError({'images': 'Phai cung cap dung 5 anh khuon mat'})
+            raise serializers.ValidationError({'images': 'Phải cung cấp đúng 5 ảnh khuôn mặt.'})
         if len(attrs['poses']) != 5:
-            raise serializers.ValidationError({'poses': 'Phai cung cap dung 5 goc chup'})
+            raise serializers.ValidationError({'poses': 'Phải cung cấp đúng 5 góc chụp.'})
         return attrs
 
 
@@ -53,5 +53,5 @@ class FaceValidateRequestSerializer(serializers.Serializer):
 
     def validate_image(self, value):
         if not value:
-            raise serializers.ValidationError('Thieu du lieu anh')
+            raise serializers.ValidationError('Thiếu dữ liệu ảnh.')
         return value

@@ -10,11 +10,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from facenet_pytorch import MTCNN
 
-from webcam_capture_test import (
-    RECOGNITION_ROOT,
-    WORKSPACE_ROOT,
-    choose_device,+
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = PROJECT_ROOT
+
+
+def choose_device(requested):
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(requested)
 
 
 POSES = [
@@ -36,7 +39,7 @@ ARCFACE_TEMPLATE_112 = np.array(
     dtype=np.float32,
 )
 
-FRIEND_CHECKPOINT = Path(r"C:\Users\ADMIN\Downloads\last_checkpoint.pth")
+FRIEND_CHECKPOINT = PROJECT_ROOT / "last_checkpoint.pth"
 
 
 class FriendConvBlock(nn.Module):

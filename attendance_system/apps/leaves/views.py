@@ -4,7 +4,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import IsAuthenticated, IsAdminOrManager
+from apps.accounts.permissions import IsAdmin, IsAdminOrEmployee, IsAuthenticated, IsEmployee
 from apps.attendance.models import AttendanceLog
 from apps.employees.models import Employee
 from .models import LeaveType, LeaveRequest
@@ -38,22 +38,17 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         return LeaveRequestListSerializer
 
     def get_permissions(self):
-        if self.action in ['approve', 'reject']:
-            return [IsAdminOrManager()]
-        return [IsAuthenticated()]
+        if self.action == 'create':
+            return [IsEmployee()]
+        if self.action in ['list', 'retrieve']:
+            return [IsAdminOrEmployee()]
+        return [IsAdmin()]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if user.is_employee:
-            qs = qs.filter(employee__user=user)
-        elif user.is_manager:
-            try:
-                manager_employee = user.employee
-                qs = qs.filter(employee__department=manager_employee.department)
-            except Employee.DoesNotExist:
-                qs = qs.none()
-        return qs
+        queryset = super().get_queryset()
+        if self.request.user.is_employee:
+            return queryset.filter(employee__user=self.request.user)
+        return queryset
 
     def perform_create(self, serializer):
         """Employee creates a leave request for themselves."""

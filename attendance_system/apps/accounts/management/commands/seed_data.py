@@ -1,10 +1,12 @@
-from datetime import date, time
+from datetime import date
 
 from django.core.management.base import BaseCommand
 
 from apps.accounts.models import CustomUser
 from apps.employees.models import Department, Employee
-from apps.shifts.models import Shift, EmployeeShift
+from apps.shifts.defaults import get_or_create_default_shift
+from apps.shifts.models import EmployeeShift
+from apps.leaves.defaults import DEFAULT_LEAVE_TYPES
 from apps.leaves.models import LeaveType
 
 
@@ -15,32 +17,16 @@ class Command(BaseCommand):
         self.stdout.write('Seeding database...')
 
         # ─── Leave Types ─────────────────────────────────
-        lt_annual, _ = LeaveType.objects.get_or_create(
-            name='Nghỉ phép năm', defaults={'max_days_per_year': 12}
-        )
-        lt_sick, _ = LeaveType.objects.get_or_create(
-            name='Nghỉ ốm', defaults={'max_days_per_year': 30}
-        )
-        self.stdout.write(self.style.SUCCESS('  ✓ Leave types created'))
+        for name, max_days_per_year in DEFAULT_LEAVE_TYPES:
+            LeaveType.objects.update_or_create(
+                name=name,
+                defaults={'max_days_per_year': max_days_per_year},
+            )
+        self.stdout.write(self.style.SUCCESS('  ✓ Default leave types created'))
 
         # ─── Shifts ──────────────────────────────────────
-        shift_morning, _ = Shift.objects.get_or_create(
-            name='Ca sáng',
-            defaults={
-                'start_time': time(8, 0),
-                'end_time': time(12, 0),
-                'late_threshold': 15,
-            },
-        )
-        shift_afternoon, _ = Shift.objects.get_or_create(
-            name='Ca chiều',
-            defaults={
-                'start_time': time(13, 0),
-                'end_time': time(17, 0),
-                'late_threshold': 15,
-            },
-        )
-        self.stdout.write(self.style.SUCCESS('  ✓ Shifts created'))
+        default_shift = get_or_create_default_shift()
+        self.stdout.write(self.style.SUCCESS('  ✓ Default shift created'))
 
         # ─── Admin User ─────────────────────────────────
         admin_user, created = CustomUser.objects.get_or_create(
@@ -187,14 +173,13 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('  ✓ 5 Employees created'))
 
         # ─── Assign shifts ───────────────────────────────
-        all_employees = [mgr1_emp, mgr2_emp] + created_employees
-        for emp in all_employees:
+        for emp in created_employees:
             EmployeeShift.objects.get_or_create(
                 employee=emp,
-                shift=shift_morning,
-                defaults={'effective_date': date(2025, 1, 1)},
+                shift=default_shift,
+                defaults={'effective_date': date(2026, 6, 6)},
             )
-        self.stdout.write(self.style.SUCCESS('  ✓ Shifts assigned to all employees'))
+        self.stdout.write(self.style.SUCCESS('  ✓ Default shift assigned to employees'))
 
         self.stdout.write(self.style.SUCCESS('\nSeed completed successfully!'))
         self.stdout.write('Accounts:')

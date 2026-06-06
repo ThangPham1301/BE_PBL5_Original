@@ -64,7 +64,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': False,
                 'data': None,
-                'message': 'Vui long gui anh khuon mat qua field image, file hoac photo.',
+                'message': 'Vui lòng gửi ảnh khuôn mặt qua trường image, file hoặc photo.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         service = FaceRecognitionService()
@@ -72,16 +72,16 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
 
         if not found_face:
             error_messages = {
-                'invalid_image': 'Anh gui len khong decode duoc. Hay gui file jpg/png hoac base64 anh hop le.',
-                'no_face_detected': 'Khong phat hien khuon mat trong anh. Hay chup ro mat, du sang va gan camera hon.',
-                'invalid_face_crop': 'Khong crop duoc khuon mat tu anh. Hay thu lai voi anh ro hon.',
-                'models_unavailable': 'Model nhan dien khuon mat chua san sang.',
+                'invalid_image': 'Không thể giải mã ảnh. Hãy gửi tệp JPG/PNG hoặc dữ liệu base64 hợp lệ.',
+                'no_face_detected': 'Không phát hiện khuôn mặt trong ảnh. Hãy chụp rõ mặt, đủ sáng và gần camera hơn.',
+                'invalid_face_crop': 'Không thể cắt khuôn mặt từ ảnh. Hãy thử lại với ảnh rõ hơn.',
+                'models_unavailable': 'Mô hình nhận diện khuôn mặt chưa sẵn sàng.',
             }
             error_code = getattr(service, 'last_error', None)
             return Response({
                 'success': False,
                 'data': {'error_code': error_code},
-                'message': error_messages.get(error_code, 'Khong phat hien khuon mat trong anh.'),
+                'message': error_messages.get(error_code, 'Không phát hiện khuôn mặt trong ảnh.'),
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if not employee_pk:
@@ -91,7 +91,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
                     'confidence': confidence,
                     'error_code': 'employee_not_recognized',
                 },
-                'message': 'Co khuon mat nhung khong khop voi nhan vien nao trong du lieu dang ky.',
+                'message': 'Có khuôn mặt nhưng không khớp với nhân viên nào trong dữ liệu đăng ký.',
             }, status=status.HTTP_200_OK)
 
         try:
@@ -100,7 +100,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': False,
                 'data': None,
-                'message': 'Nhan vien khong ton tai hoac da bi vo hieu hoa.',
+                'message': 'Nhân viên không tồn tại hoặc đã bị vô hiệu hóa.',
             }, status=status.HTTP_404_NOT_FOUND)
 
         employee_name = employee.user.get_full_name() or employee.user.username
@@ -121,7 +121,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             'success': True,
             'data': data,
-            'message': 'Check-in thanh cong.',
+            'message': 'Chấm công vào thành công.',
         })
 
     @action(detail=False, methods=['post'], url_path='check-out')
@@ -136,7 +136,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': False,
                 'data': None,
-                'message': 'Nhan vien khong ton tai hoac da bi vo hieu hoa.',
+                'message': 'Nhân viên không tồn tại hoặc đã bị vô hiệu hóa.',
             }, status=status.HTTP_404_NOT_FOUND)
 
         today = timezone.localdate()
@@ -148,14 +148,14 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'success': False,
                 'data': None,
-                'message': 'Nhan vien chua check-in hom nay.',
+                'message': 'Nhân viên chưa chấm công vào hôm nay.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if log.check_out:
             return Response({
                 'success': False,
                 'data': None,
-                'message': 'Nhan vien da check-out hom nay roi.',
+                'message': 'Nhân viên đã chấm công ra hôm nay.',
             }, status=status.HTTP_400_BAD_REQUEST)
 
         log.check_out = now
@@ -164,7 +164,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             'success': True,
             'data': AttendanceLogDetailSerializer(log).data,
-            'message': 'Check-out thanh cong.',
+            'message': 'Chấm công ra thành công.',
         })
 
     @action(detail=False, methods=['get'], url_path='today')
@@ -183,6 +183,43 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             'message': '',
         })
 
+    @action(detail=False, methods=['get'], url_path='smart-office-access')
+    def smart_office_access(self, request):
+        try:
+            employee = request.user.employee
+        except Employee.DoesNotExist:
+            return Response({
+                'success': True,
+                'data': {
+                    'can_control': False,
+                    'checked_in': False,
+                    'checked_out': False,
+                },
+                'message': 'Tài khoản chưa được liên kết với hồ sơ nhân viên.',
+            })
+
+        log = AttendanceLog.objects.filter(
+            employee=employee,
+            date=timezone.localdate(),
+        ).first()
+        checked_in = bool(log and log.check_in)
+        checked_out = bool(log and log.check_out)
+        can_control = checked_in and not checked_out
+
+        return Response({
+            'success': True,
+            'data': {
+                'can_control': can_control,
+                'checked_in': checked_in,
+                'checked_out': checked_out,
+            },
+            'message': (
+                ''
+                if can_control
+                else 'Bạn cần chấm công vào và chưa chấm công ra để điều khiển thiết bị.'
+            ),
+        })
+
     def _create_check_in_log(self, employee):
         today = timezone.localdate()
         now = timezone.now()
@@ -198,7 +235,7 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
                 return None, Response({
                     'success': False,
                     'data': None,
-                    'message': 'Nhan vien da check-in hom nay roi.',
+                    'message': 'Nhân viên đã chấm công vào hôm nay.',
                 }, status=status.HTTP_400_BAD_REQUEST)
             log.check_in = now
             log.save(update_fields=['check_in'])
@@ -254,6 +291,9 @@ class AttendanceViewSet(viewsets.ReadOnlyModelViewSet):
             return AttendanceLog.Status.PRESENT
 
         shift = emp_shift.shift
+        if today.weekday() not in shift.work_days:
+            return AttendanceLog.Status.PRESENT
+
         shift_start = datetime.combine(today, shift.start_time)
         shift_start_dt = (
             timezone.make_aware(shift_start)

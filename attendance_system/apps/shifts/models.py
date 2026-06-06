@@ -2,10 +2,18 @@ from django.db import models
 from apps.employees.models import Employee
 
 
+def default_work_days():
+    return [0, 1, 2, 3, 4]
+
+
 class Shift(models.Model):
     name = models.CharField(max_length=100, verbose_name='Tên ca')
     start_time = models.TimeField(verbose_name='Giờ bắt đầu')
     end_time = models.TimeField(verbose_name='Giờ kết thúc')
+    work_days = models.JSONField(
+        default=default_work_days,
+        verbose_name='Ngày làm việc',
+    )
     late_threshold = models.PositiveIntegerField(
         default=15,
         verbose_name='Ngưỡng đi trễ (phút)',
