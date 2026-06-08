@@ -1,13 +1,9 @@
 import cv2
 import time
 import requests
-import numpy as np
-from pathlib import Path
 from django.core.management.base import BaseCommand
-from django.conf import settings
-# Use absolute imports based on app structure
-from apps.face_recognition.core.facekit.detector_resnet10 import ResNet10FaceDetector
-from apps.face_recognition.core.facekit.vision_utils import square_crop, draw_label
+from apps.face_recognition.core.facekit.detector_mtcnn import MTCNNArcFaceAligner
+from apps.face_recognition.core.facekit.vision_utils import draw_label
 
 class Command(BaseCommand):
     help = 'Run the Raspberry Pi IoT Client Simulator for Face Recognition'
@@ -24,28 +20,15 @@ class Command(BaseCommand):
         self.stdout.write(f"Server: {server_url}")
         self.stdout.write(f"Camera: {camera_idx}")
         
-        # 1. Setup paths to models
-        import apps.face_recognition
-        app_path = Path(apps.face_recognition.__file__).parent
-        models_dir = app_path / 'core' / 'models'
-        
-        prototxt = models_dir / 'deploy.prototxt'
-        caffemodel = models_dir / 'res10_300x300_ssd_iter_140000_fp16.caffemodel'
-        
-        if not prototxt.exists() or not caffemodel.exists():
-            self.stdout.write(self.style.ERROR(f"Models mismatch! Checked {models_dir}"))
-            self.stdout.write(f"Prototxt: {prototxt} ({prototxt.exists()})")
-            return
-
-        # 2. Init Local Detector
-        self.stdout.write("Initializing local detector...")
+        # 1. Init Local MTCNN Detector
+        self.stdout.write("Initializing local MTCNN detector...")
         try:
-            detector = ResNet10FaceDetector(prototxt, caffemodel)
+            detector = MTCNNArcFaceAligner()
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"Failed to load detector: {e}"))
             return
         
-        # 3. Camera Loop
+        # 2. Camera Loop
         cap = cv2.VideoCapture(camera_idx)
         if not cap.isOpened():
             self.stdout.write(self.style.ERROR(f"Cannot open webcam index {camera_idx}"))
@@ -66,20 +49,18 @@ class Command(BaseCommand):
                 break
                 
             # Detect locally
-            detections = detector.detect(frame, conf_threshold=0.6)
+            detections = detector.detect(frame, conf_threshold=0.85)
             
             # Draw boxes
             for det in detections:
-                x1, y1, x2, y2 = det.as_tuple()
+                x1, y1, x2, y2 = det.box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
                 
                 # Check interval to send to server
                 if time.time() - last_sent_time > INTERVAL:
-                    # Crop with margin
-                    face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
-                    if face_crop.size > 0:
+                    if det.aligned_bgr.size > 0:
                         # Encode
-                        _, img_encoded = cv2.imencode('.jpg', face_crop)
+                        _, img_encoded = cv2.imencode('.jpg', frame)
                         
                         try:
                             # Send to API

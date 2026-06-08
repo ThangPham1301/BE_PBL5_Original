@@ -4,6 +4,16 @@ from apps.accounts.serializers import UserSerializer, UserCreateSerializer
 from .models import Department, Employee
 
 
+EMPLOYEE_USER_ROLES = {'manager', 'employee'}
+
+
+def validate_employee_user_role(user_data):
+    role = user_data.get('role')
+    if role and role not in EMPLOYEE_USER_ROLES:
+        raise serializers.ValidationError({'role': 'Chỉ được chọn vai trò quản lý hoặc nhân viên.'})
+    return user_data
+
+
 # ─── Department ──────────────────────────────────────────
 class DepartmentListSerializer(serializers.ModelSerializer):
     manager_name = serializers.SerializerMethodField()
@@ -78,6 +88,9 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
             'position', 'phone', 'date_joined',
         ]
 
+    def validate_user(self, value):
+        return validate_employee_user_role(value)
+
     def create(self, validated_data):
         user_data = validated_data.pop('user')
         validated_data['date_joined'] = timezone.localdate()
@@ -98,18 +111,39 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 
 
 class EmployeeUpdateSerializer(serializers.ModelSerializer):
+    user = serializers.DictField(required=False, write_only=True)
     department = serializers.PrimaryKeyRelatedField(
         queryset=Department.objects.all(),
         required=False,
         allow_null=True,
     )
     position = serializers.CharField(required=False, allow_blank=True)
+    date_joined = serializers.DateField(required=False)
 
     class Meta:
         model = Employee
         fields = [
-            'department', 'position', 'phone', 'date_joined',
+            'user', 'employee_id', 'department', 'position', 'phone', 'date_joined',
         ]
+
+    def validate_user(self, value):
+        return validate_employee_user_role(value)
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop('user', None)
+        employee = super().update(instance, validated_data)
+
+        if user_data:
+            user = employee.user
+            for field in ['username', 'email', 'first_name', 'last_name', 'role']:
+                if field in user_data:
+                    setattr(user, field, user_data[field])
+            password = user_data.get('password')
+            if password:
+                user.set_password(password)
+            user.save()
+
+        return employee
 
 
 class FaceEncodingSerializer(serializers.Serializer):

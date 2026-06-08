@@ -22,20 +22,29 @@ def lazy_import_torch():
 
 
 class MobileFaceNetFactory:
-    """MobileFaceNet architecture matching CongTien13/PBL5_Lab_Manager ai-model."""
+    """MobileFaceNet architecture used by recognition_pbl5_128d and bm6.pth."""
 
     def __init__(self, embedding_size: int = 128):
         torch, nn, F = lazy_import_torch()
         module_cls = nn.Module
 
+        class ConvBN(module_cls):
+            def __init__(self, inp, oup, k=3, s=1, p=1, groups=1):
+                super().__init__()
+                self.block = nn.Sequential(
+                    nn.Conv2d(inp, oup, k, s, p, groups=groups, bias=False),
+                    nn.BatchNorm2d(oup),
+                    nn.PReLU(oup),
+                )
+
+            def forward(self, x):
+                return self.block(x)
+
         class ConvBlock(module_cls):
-            def __init__(self, inp, oup, k, s, p, dw=False, linear=False):
+            def __init__(self, inp, oup, k=3, s=1, p=1, groups=1, linear=False):
                 super().__init__()
                 self.linear = linear
-                if dw:
-                    self.conv = nn.Conv2d(inp, oup, k, s, p, groups=inp, bias=False)
-                else:
-                    self.conv = nn.Conv2d(inp, oup, k, s, p, bias=False)
+                self.conv = nn.Conv2d(inp, oup, k, s, p, groups=groups, bias=False)
                 self.bn = nn.BatchNorm2d(oup)
                 if not linear:
                     self.prelu = nn.PReLU(oup)
@@ -45,51 +54,59 @@ class MobileFaceNetFactory:
                 return x if self.linear else self.prelu(x)
 
         class Bottleneck(module_cls):
-            def __init__(self, inp, oup, stride, expansion):
+            def __init__(self, inp, oup, stride, expand_ratio):
                 super().__init__()
-                self.connect = stride == 1 and inp == oup
+                hidden = inp * expand_ratio
+                self.use_res = stride == 1 and inp == oup
                 self.conv = nn.Sequential(
-                    ConvBlock(inp, inp * expansion, 1, 1, 0),
-                    ConvBlock(inp * expansion, inp * expansion, 3, stride, 1, dw=True),
-                    ConvBlock(inp * expansion, oup, 1, 1, 0, linear=True),
+                    ConvBlock(inp, hidden, k=1, s=1, p=0),
+                    ConvBlock(hidden, hidden, k=3, s=stride, p=1, groups=hidden),
+                    ConvBlock(hidden, oup, k=1, s=1, p=0, linear=True),
                 )
 
             def forward(self, x):
-                return x + self.conv(x) if self.connect else self.conv(x)
+                return x + self.conv(x) if self.use_res else self.conv(x)
 
         class MobileFaceNet(module_cls):
-            def __init__(self, embedding_size=128):
+            cfg = [
+                (2, 64, 5, 2),
+                (4, 128, 1, 2),
+                (2, 128, 6, 1),
+                (4, 128, 1, 2),
+                (2, 128, 2, 1),
+            ]
+
+            def __init__(self, emb=128):
                 super().__init__()
-                self.conv1 = ConvBlock(3, 64, 3, 2, 1)
-                self.dw_conv1 = ConvBlock(64, 64, 3, 1, 1, dw=True)
-                self.inplanes = 64
-                setting = [
-                    [2, 64, 5, 2],
-                    [4, 128, 1, 2],
-                    [2, 128, 6, 1],
-                    [4, 128, 1, 2],
-                    [2, 128, 2, 1],
-                ]
+                self.conv1 = ConvBN(3, 64, k=3, s=2, p=1)
+                self.dw_conv = ConvBN(64, 64, k=3, s=1, p=1, groups=64)
+
                 layers = []
-                for t, c, n, s in setting:
+                inp = 64
+                for t, c, n, s in self.cfg:
                     for i in range(n):
-                        stride = s if i == 0 else 1
-                        layers.append(Bottleneck(self.inplanes, c, stride, t))
-                        self.inplanes = c
+                        layers.append(Bottleneck(inp, c, stride=s if i == 0 else 1, expand_ratio=t))
+                        inp = c
                 self.blocks = nn.Sequential(*layers)
-                self.conv2 = ConvBlock(128, 512, 1, 1, 0)
-                self.linear7 = ConvBlock(512, 512, (7, 6), 1, 0, dw=True, linear=True)
-                self.linear1 = ConvBlock(512, embedding_size, 1, 1, 0, linear=True)
+
+                self.conv2 = ConvBN(128, 512, k=1, s=1, p=0)
+                self.gdc = nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=(7, 6), groups=512, bias=False),
+                    nn.BatchNorm2d(512),
+                )
+                self.linear1 = nn.Sequential(
+                    nn.Flatten(),
+                    nn.Linear(512, emb, bias=False),
+                    nn.BatchNorm1d(emb),
+                )
 
             def forward(self, x):
                 x = self.conv1(x)
-                x = self.dw_conv1(x)
+                x = self.dw_conv(x)
                 x = self.blocks(x)
                 x = self.conv2(x)
-                x = self.linear7(x)
-                x = self.linear1(x)
-                x = x.view(x.size(0), -1)
-                return F.normalize(x)
+                x = self.gdc(x)
+                return self.linear1(x)
 
         self.torch = torch
         self.F = F
@@ -97,7 +114,7 @@ class MobileFaceNetFactory:
 
 
 class MobileFaceNetPyTorchEmbedder:
-    """PyTorch MobileFaceNet embedder for last_checkpoint.pth."""
+    """PyTorch MobileFaceNet embedder for bm6.pth."""
 
     def __init__(self, model_path: Path, embedding_size: int = 128):
         self.model_path = Path(model_path)

@@ -1,14 +1,14 @@
 import argparse
-import copy
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from facenet_pytorch import MTCNN
+
+from apps.face_recognition.core.facekit.embedder_mobilefacenet_pytorch import MobileFaceNetFactory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = PROJECT_ROOT
@@ -39,77 +39,25 @@ ARCFACE_TEMPLATE_112 = np.array(
     dtype=np.float32,
 )
 
-FRIEND_CHECKPOINT = PROJECT_ROOT / "last_checkpoint.pth"
+BM6_CHECKPOINT = PROJECT_ROOT / "bm6.pth"
 
 
-class FriendConvBlock(nn.Module):
-    def __init__(self, inp, oup, k, s, p, dw=False, linear=False):
-        super().__init__()
-        self.linear = linear
-        self.conv = nn.Conv2d(inp, oup, k, s, p, groups=inp if dw else 1, bias=False)
-        self.bn = nn.BatchNorm2d(oup)
-        if not linear:
-            self.prelu = nn.PReLU(oup)
-
-    def forward(self, x):
-        x = self.bn(self.conv(x))
-        return x if self.linear else self.prelu(x)
-
-
-class FriendBottleneck(nn.Module):
-    def __init__(self, inp, oup, stride, expansion):
-        super().__init__()
-        self.connect = stride == 1 and inp == oup
-        self.conv = nn.Sequential(
-            FriendConvBlock(inp, inp * expansion, 1, 1, 0),
-            FriendConvBlock(inp * expansion, inp * expansion, 3, stride, 1, dw=True),
-            FriendConvBlock(inp * expansion, oup, 1, 1, 0, linear=True),
-        )
-
-    def forward(self, x):
-        return x + self.conv(x) if self.connect else self.conv(x)
-
-
-class FriendMobileFaceNet(nn.Module):
-    def __init__(self, embedding_size=128):
-        super().__init__()
-        self.conv1 = FriendConvBlock(3, 64, 3, 2, 1)
-        self.dw_conv1 = FriendConvBlock(64, 64, 3, 1, 1, dw=True)
-        inplanes = 64
-        layers = []
-        for expansion, channels, count, stride in [
-            [2, 64, 5, 2],
-            [4, 128, 1, 2],
-            [2, 128, 6, 1],
-            [4, 128, 1, 2],
-            [2, 128, 2, 1],
-        ]:
-            for index in range(count):
-                layers.append(FriendBottleneck(inplanes, channels, stride if index == 0 else 1, expansion))
-                inplanes = channels
-        self.blocks = nn.Sequential(*layers)
-        self.conv2 = FriendConvBlock(128, 512, 1, 1, 0)
-        self.linear7 = FriendConvBlock(512, 512, (7, 6), 1, 0, dw=True, linear=True)
-        self.linear1 = FriendConvBlock(512, embedding_size, 1, 1, 0, linear=True)
-
-    def forward(self, x):
-        x = self.linear1(self.linear7(self.conv2(self.blocks(self.dw_conv1(self.conv1(x))))))
-        return F.normalize(x.view(x.size(0), -1), dim=1)
-
-
-def load_friend_model(device):
-    if not FRIEND_CHECKPOINT.exists():
-        raise FileNotFoundError(f"Friend checkpoint not found: {FRIEND_CHECKPOINT}")
-    checkpoint = torch.load(str(FRIEND_CHECKPOINT), map_location="cpu", weights_only=False)
-    model = FriendMobileFaceNet(embedding_size=128)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+def load_mobilefacenet_model(device, checkpoint_path=None):
+    checkpoint_path = Path(checkpoint_path) if checkpoint_path else BM6_CHECKPOINT
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"MobileFaceNet checkpoint not found: {checkpoint_path}")
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        checkpoint = checkpoint["model_state_dict"]
+    model = MobileFaceNetFactory(128).model
+    model.load_state_dict(checkpoint, strict=True)
     model.to(device).eval()
-    print(f"Loaded friend pipeline checkpoint: {FRIEND_CHECKPOINT} | epoch={checkpoint.get('epoch')}")
+    print(f"Loaded MobileFaceNet checkpoint: {checkpoint_path}")
     return model
 
 
-def model_input_size(model_version):
-    return (112, 96) if model_version == "friend" else (112, 112)
+def model_input_size():
+    return (112, 96)
 
 
 @torch.no_grad()
@@ -439,8 +387,6 @@ def compare_gallery(args, model, detector, device, reference_embeddings, model_n
 
     rows.sort(key=lambda item: item[1], reverse=True)
     output = Path(args.output)
-    if args.all_models:
-        output = output.with_name(f"{output.stem}_{model_name}{output.suffix}")
     output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output), annotated)
 
@@ -472,13 +418,7 @@ def build_parser():
         action="store_true",
         help="After capturing 5 references, compare live webcam faces against them.",
     )
-    parser.add_argument(
-        "--model-version",
-        choices=["new", "bm2", "bm3", "lm", "lm2", "old", "pretrained", "friend"],
-        default="new",
-    )
-    parser.add_argument("--model", type=str, default=None, help="MobileFaceNet checkpoint path. Overrides --model-version.")
-    parser.add_argument("--embedding-size", type=int, default=512)
+    parser.add_argument("--model", type=str, default=str(BM6_CHECKPOINT), help="MobileFaceNet checkpoint path.")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--image-size", type=int, default=112)
     parser.add_argument(
@@ -486,11 +426,6 @@ def build_parser():
         choices=["aligned", "crop"],
         default="aligned",
         help="Align with MTCNN landmarks or use an expanded detector crop.",
-    )
-    parser.add_argument(
-        "--all-models",
-        action="store_true",
-        help="Run the same captured references through all configured checkpoints, including the friend's 128-d model.",
     )
     parser.add_argument("--threshold", type=float, default=0.45, help="Match when the best of 5 cosine scores reaches this value.")
     parser.add_argument("--det-conf", type=float, default=0.90, help="MTCNN confidence threshold.")
@@ -511,28 +446,18 @@ def main():
     args = build_parser().parse_args()
     if not args.realtime and args.gallery is None:
         raise SystemExit("Provide --gallery for image comparison, or use --realtime.")
-    if args.realtime and args.all_models:
-        raise SystemExit("--realtime uses one model at a time. Choose --model-version instead of --all-models.")
 
     device = choose_device(args.device)
     detector = load_mtcnn(device, args.min_face_size)
     reference_faces = capture_five_angles(args, detector)
 
-    model_versions = ["new", "bm2", "bm3", "lm", "lm2", "old", "pretrained", "friend"] if args.all_models else [args.model_version]
-    for model_version in model_versions:
-        model_args = copy.copy(args)
-        model_args.model_version = model_version
-        model_args.model_input_size = model_input_size(model_version)
-        if args.all_models:
-            model_args.model = None
-        model = load_friend_model(device) if model_version == "friend" else load_recognition_model(
-            resolve_model_path(model_args), args.embedding_size, device
-        )
-        references = make_reference_embeddings(model_args, model, device, reference_faces)
-        if args.realtime:
-            compare_realtime(model_args, model, detector, device, references, model_version)
-        else:
-            compare_gallery(model_args, model, detector, device, references, model_version)
+    args.model_input_size = model_input_size()
+    model = load_mobilefacenet_model(device, args.model)
+    references = make_reference_embeddings(args, model, device, reference_faces)
+    if args.realtime:
+        compare_realtime(args, model, detector, device, references, "bm6")
+    else:
+        compare_gallery(args, model, detector, device, references, "bm6")
 
 
 if __name__ == "__main__":

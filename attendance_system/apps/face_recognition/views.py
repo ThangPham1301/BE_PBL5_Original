@@ -91,9 +91,17 @@ class RecognizeAPIView(APIView):
             found_face, employee_id, confidence = service.process_image(image_bytes)
             
             if not found_face:
+                 error_code = getattr(service, 'last_error', None)
+                 error_messages = {
+                     'invalid_image': 'Không thể giải mã ảnh.',
+                     'no_face_detected': 'Không phát hiện khuôn mặt trong ảnh.',
+                     'invalid_face_crop': 'Không thể cắt khuôn mặt từ ảnh.',
+                     'models_unavailable': 'Mô hình nhận diện khuôn mặt chưa sẵn sàng.',
+                 }
                  return Response({
                      'success': False,
-                     'message': 'Không phát hiện khuôn mặt trong ảnh.'
+                     'error_code': error_code,
+                     'message': error_messages.get(error_code, 'Không phát hiện khuôn mặt trong ảnh.'),
                  }, status=status.HTTP_400_BAD_REQUEST)
                  
             if employee_id:

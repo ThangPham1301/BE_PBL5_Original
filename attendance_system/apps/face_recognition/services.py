@@ -6,16 +6,11 @@ import cv2
 from django.conf import settings
 from .models import FaceEmbedding
 from apps.employees.models import Employee
-from .core.facekit.embedder_mobilefacenet_arcface import MobileFaceNetArcFaceEmbedder
 from .core.facekit.embedder_mobilefacenet_pytorch import MobileFaceNetPyTorchEmbedder
-from .core.facekit.detector_resnet10 import ResNet10FaceDetector
-from .core.facekit.detector_scrfd import SCRFDFaceDetector
 from .core.facekit.detector_mtcnn import MTCNNArcFaceAligner
-from .core.facekit.vision_utils import square_crop
 
 # Define paths relative to this file
 BASE_DIR = Path(__file__).resolve().parent
-MODELS_DIR = BASE_DIR / 'core' / 'models'
 PROJECT_DIR = BASE_DIR.parent.parent
 
 class FaceRecognitionService:
@@ -29,13 +24,12 @@ class FaceRecognitionService:
 
     def initialize(self):
         print("Initializing FaceRecognitionService...")
-        self.detector = None
         self.registration_detector = None
         self.embedder = None
         self.last_error = None
 
-        # Registration uses MTCNN landmarks and ArcFace 112x112 alignment so the
-        # crop geometry matches the MobileFaceNet checkpoint training pipeline.
+        # MTCNN is the only detector used by the project. It provides landmarks
+        # and aligns faces to the 112x96 MobileFaceNet input geometry.
         try:
             self.registration_detector = MTCNNArcFaceAligner(
                 image_size=getattr(settings, 'FACE_MTCNN_IMAGE_SIZE', 112),
@@ -46,41 +40,10 @@ class FaceRecognitionService:
             print("Loaded MTCNN registration detector with ArcFace landmark alignment")
         except Exception as e:
             print(f"Error loading MTCNN registration detector: {e}")
-        
-        # 1. Load Detector. Prefer SCRFD; keep ResNet10 as a fallback if the
-        # SCRFD ONNX file has not been added to core/models yet.
+
+        # MobileFaceNet is the only embedder. The default checkpoint is bm6.pth.
         try:
-            scrfd_model = Path(getattr(settings, 'FACE_DETECTOR_MODEL', 'scrfd_2.5g_bnkps.onnx'))
-            if not scrfd_model.is_absolute():
-                scrfd_model = MODELS_DIR / scrfd_model
-
-            if scrfd_model.exists():
-                self.detector = SCRFDFaceDetector(
-                    scrfd_model,
-                    input_size=getattr(settings, 'FACE_SCRFD_INPUT_SIZE', 640),
-                )
-                print(f"Loaded SCRFD face detector: {scrfd_model}")
-            else:
-                print(f"Warning: SCRFD detector model not found at {scrfd_model}")
-        except Exception as e:
-            print(f"Error loading SCRFD detector: {e}")
-
-        if self.detector is None:
-            try:
-                prototxt = MODELS_DIR / 'deploy.prototxt'
-                caffemodel = MODELS_DIR / 'res10_300x300_ssd_iter_140000_fp16.caffemodel'
-
-                if prototxt.exists() and caffemodel.exists():
-                    self.detector = ResNet10FaceDetector(prototxt, caffemodel)
-                    print(f"Loaded fallback ResNet10 face detector: {caffemodel}")
-                else:
-                    print(f"Warning: Fallback detector models not found at {MODELS_DIR}")
-            except Exception as e:
-                print(f"Error loading fallback detector: {e}")
-
-        # 2. Load Embedder. Prefer the configured embedding-only PyTorch model.
-        try:
-            pytorch_path = Path(getattr(settings, 'FACE_EMBEDDER_MODEL', 'last_checkpoint.pth'))
+            pytorch_path = Path(getattr(settings, 'FACE_EMBEDDER_MODEL', 'bm6.pth'))
             if not pytorch_path.is_absolute():
                 pytorch_path = PROJECT_DIR / pytorch_path
 
@@ -95,17 +58,6 @@ class FaceRecognitionService:
         except Exception as e:
             print(f"Error loading PyTorch embedder: {e}")
 
-        if self.embedder is None:
-            try:
-                onnx_path = MODELS_DIR / 'mobilefacenet_arcface.onnx'
-                if onnx_path.exists():
-                    self.embedder = MobileFaceNetArcFaceEmbedder(onnx_path)
-                    print(f"Loaded ONNX fallback embedding model: {onnx_path}")
-                else:
-                    print(f"Warning: Embedder model not found at {MODELS_DIR}")
-            except Exception as e:
-                print(f"Error loading ONNX embedder: {e}")
-            
         self.cached_embeddings = None
         self.cached_labels = None
         self.last_cache_update = 0
@@ -335,12 +287,12 @@ class FaceRecognitionService:
         Returns: Tuple(has_face, employee_id, confidence_score/distance)
         """
         self.last_error = None
-        if self.detector is None or self.embedder is None:
+        if self.registration_detector is None or self.embedder is None:
             self.initialize()
-            if self.detector is None or self.embedder is None:
-                 print("Face models unavailable.")
-                 self.last_error = "models_unavailable"
-                 return False, None, 0.0
+            if self.registration_detector is None or self.embedder is None:
+                print("Face models unavailable.")
+                self.last_error = "models_unavailable"
+                return False, None, 0.0
             
         # Decode image
         nparr = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -351,40 +303,28 @@ class FaceRecognitionService:
             self.last_error = "invalid_image"
             return False, None, 0.0
 
-        # 1. Prefer MTCNN landmark alignment for recognition as well, so the
-        # check-in crop is geometrically consistent with registration.
+        # 1. Detect and align with MTCNN, matching the registration pipeline.
         threshold = 0.5 if detect_threshold is None else detect_threshold
         face_crop = None
 
-        if self.registration_detector is not None:
-            mtcnn_threshold = getattr(settings, 'FACE_RECOGNITION_MTCNN_THRESHOLD', 0.85)
-            faces = self.registration_detector.detect(frame, conf_threshold=mtcnn_threshold)
-            if faces:
-                face_crop = faces[0].aligned_bgr
+        mtcnn_threshold = getattr(settings, 'FACE_RECOGNITION_MTCNN_THRESHOLD', 0.85)
+        faces = self.registration_detector.detect(frame, conf_threshold=mtcnn_threshold)
+        if not faces and detect_threshold is not None:
+            try:
+                h, w = frame.shape[:2]
+                upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+                faces = self.registration_detector.detect(upscaled, conf_threshold=max(0.2, threshold - 0.1))
+                if faces:
+                    frame = upscaled
+            except Exception:
+                faces = []
 
-        if face_crop is None:
-            # Check-in images can come from external cameras, so allow a lower
-            # threshold and one upscale fallback when requested by the caller.
-            detections = self.detector.detect(frame, conf_threshold=threshold)
+        if not faces:
+            print(f"[FACE CHECK-IN] No face detected by MTCNN. frame_shape={frame.shape}, threshold={mtcnn_threshold}")
+            self.last_error = "no_face_detected"
+            return False, None, 0.0
 
-            if not detections and detect_threshold is not None:
-                try:
-                    h, w = frame.shape[:2]
-                    upscaled = cv2.resize(frame, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
-                    detections = self.detector.detect(upscaled, conf_threshold=max(0.2, threshold - 0.1))
-                    if detections:
-                        frame = upscaled
-                except Exception:
-                    detections = []
-            
-            if not detections:
-                print(f"[FACE CHECK-IN] No face detected. frame_shape={frame.shape}, threshold={threshold}")
-                self.last_error = "no_face_detected"
-                return False, None, 0.0
-                
-            best_face = max(detections, key=lambda d: d.w * d.h)
-            x1, y1, x2, y2 = best_face.as_tuple()
-            face_crop = square_crop(frame, (x1, y1, x2, y2), scale=1.25)
+        face_crop = faces[0].aligned_bgr
 
         if face_crop.size == 0:
             print("[FACE CHECK-IN] Invalid face crop.")
