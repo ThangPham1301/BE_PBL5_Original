@@ -269,7 +269,7 @@ class FaceRecognitionService:
         scores = self.cached_embeddings @ embedding
         best_idx = int(np.argmax(scores))
         best_score = float(scores[best_idx])
-        threshold = getattr(settings, 'FACE_MATCH_THRESHOLD', 0.4) if match_threshold is None else match_threshold
+        threshold = getattr(settings, 'FACE_MATCH_THRESHOLD', 0.65) if match_threshold is None else match_threshold
 
         print(
             f"[FACE DB] Best match score={best_score:.4f} "

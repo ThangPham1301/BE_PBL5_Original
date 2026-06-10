@@ -48,7 +48,13 @@ class EmployeeShift(models.Model):
         db_table = 'employee_shifts'
         verbose_name = 'Phân ca'
         verbose_name_plural = 'Phân ca'
-        ordering = ['-effective_date']
+        ordering = ['-effective_date', 'shift__start_time']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee', 'shift', 'effective_date'],
+                name='unique_employee_shift_effective_date',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.employee} - {self.shift} (from {self.effective_date})"

@@ -1,3 +1,6 @@
+from uuid import uuid4
+
+from django.db import transaction
 from rest_framework import serializers
 from django.utils import timezone
 from apps.accounts.serializers import UserSerializer, UserCreateSerializer
@@ -73,6 +76,7 @@ class EmployeeDetailSerializer(serializers.ModelSerializer):
 
 class EmployeeCreateSerializer(serializers.ModelSerializer):
     user = UserCreateSerializer()
+    employee_id = serializers.CharField(read_only=True)
     department = serializers.PrimaryKeyRelatedField(
         queryset=Department.objects.all(),
         required=False,
@@ -94,19 +98,30 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user_data = validated_data.pop('user')
         validated_data['date_joined'] = timezone.localdate()
-        user_serializer = UserCreateSerializer(data=user_data)
-        user_serializer.is_valid(raise_exception=True)
-        user = user_serializer.save()
-        employee = Employee.objects.create(user=user, **validated_data)
-        if user.role == 'employee':
-            from apps.shifts.defaults import get_or_create_default_shift
-            from apps.shifts.models import EmployeeShift
+        validated_data.pop('employee_id', None)
 
-            EmployeeShift.objects.create(
-                employee=employee,
-                shift=get_or_create_default_shift(),
-                effective_date=employee.date_joined,
+        with transaction.atomic():
+            user_serializer = UserCreateSerializer(data=user_data)
+            user_serializer.is_valid(raise_exception=True)
+            user = user_serializer.save()
+            employee = Employee.objects.create(
+                user=user,
+                employee_id=f'TMP-{uuid4().hex[:16]}',
+                **validated_data,
             )
+            prefix = 'MGR' if user.role == 'manager' else 'NV'
+            employee.employee_id = f'{prefix}{employee.pk:05d}'
+            employee.save(update_fields=['employee_id'])
+
+            if user.role == 'employee':
+                from apps.shifts.defaults import get_or_create_default_shift
+                from apps.shifts.models import EmployeeShift
+
+                EmployeeShift.objects.create(
+                    employee=employee,
+                    shift=get_or_create_default_shift(),
+                    effective_date=employee.date_joined,
+                )
         return employee
 
 
@@ -123,7 +138,7 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = [
-            'user', 'employee_id', 'department', 'position', 'phone', 'date_joined',
+            'user', 'department', 'position', 'phone', 'date_joined',
         ]
 
     def validate_user(self, value):

@@ -8,6 +8,7 @@ urlpatterns = [
     path('api/', include('apps.shifts.urls')),
     path('api/', include('apps.attendance.urls')),
     path('api/', include('apps.leaves.urls')),
+    path('api/', include('apps.overtime.urls')),
     path('api/', include('apps.reports.urls')),
     path('api/face/', include('apps.face_recognition.urls')),
 ]

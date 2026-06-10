@@ -42,6 +42,7 @@ LOCAL_APPS = [
     'apps.shifts',
     'apps.attendance',
     'apps.leaves',
+    'apps.overtime',
     'apps.reports',
     'apps.face_recognition',
 ]
@@ -149,7 +150,7 @@ SIMPLE_JWT = {
 }
 
 # Face Recognition Settings
-FACE_MATCH_THRESHOLD = 0.35  # Giảm xuống 0.35 để dễ nhận diện hơn với Webcam thường
+FACE_MATCH_THRESHOLD = float(os.getenv('FACE_MATCH_THRESHOLD', '0.65'))
 FACE_CACHE_TTL = 30  # Seconds to cache embeddings
 FACE_EMBEDDER_MODEL = os.getenv('FACE_EMBEDDER_MODEL', 'bm6.pth')
 FACE_EMBEDDING_SIZE = int(os.getenv('FACE_EMBEDDING_SIZE', '128'))

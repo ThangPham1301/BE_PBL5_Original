@@ -5,12 +5,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework import status
 from django.utils import timezone
 from django.core.files.base import ContentFile
-from datetime import timedelta
 import base64
 from django.db import transaction
 
 from apps.employees.models import Employee
-from apps.attendance.models import AttendanceLog
 from .models import FaceEmbedding, FaceLog, FaceRegistration
 from .serializers import FaceRegisterRequestSerializer, FaceValidateRequestSerializer
 from .services import FaceRecognitionService
@@ -108,54 +106,44 @@ class RecognizeAPIView(APIView):
                 employee = Employee.objects.get(pk=employee_id)
                 employee_name = employee.user.get_full_name() or employee.user.username
                 print(
-                    f"[FACE CHECK-IN] employee_code={employee.employee_id} "
+                    f"[FACE ATTENDANCE] employee_code={employee.employee_id} "
                     f"employee_name={employee_name} confidence={confidence:.4f}"
                 )
 
                 # 1. Create Face Recognition Log (History)
                 # Save image to log (optional, but good for history)
-                log_entry = FaceLog.objects.create(
+                FaceLog.objects.create(
                     employee=employee,
                     confidence=confidence,
                     image=ContentFile(image_bytes, name=f"{employee.id}_{timezone.now().timestamp()}.jpg")
                 )
 
-                # 2. Process Attendance (Debounce based on last check-out)
-                today = timezone.localdate()
-                now = timezone.now()
+                from apps.attendance.views import AttendanceViewSet
 
-                attendance_log, created = AttendanceLog.objects.get_or_create(
-                    employee=employee,
-                    date=today,
-                    defaults={
-                        'check_in': now,
-                        'status': AttendanceLog.Status.PRESENT
-                    }
+                attendance_log, attendance_action, attendance_error = (
+                    AttendanceViewSet()._process_attendance_scan(employee)
                 )
+                if attendance_error:
+                    error_data = attendance_error.data
+                    return Response({
+                        'success': False,
+                        'identified': True,
+                        'employee_id': employee.id,
+                        'employee_code': employee.employee_id,
+                        'employee_name': employee_name,
+                        'confidence': confidence,
+                        'data': error_data.get('data'),
+                        'message': error_data.get(
+                            'message',
+                            'Không thể xử lý chấm công.',
+                        ),
+                    }, status=attendance_error.status_code)
 
-                attendance_msg = "Đã chấm công"
-
-                if created:
-                    attendance_msg = "Chấm công vào thành công (mới)"
-                else:
-                    updated_fields = []
-                    DEBOUNCE_TIME = timedelta(minutes=5)
-
-                    if not attendance_log.check_in:
-                        attendance_log.check_in = now
-                        updated_fields.append('check_in')
-                        attendance_msg = "Đã cập nhật giờ vào"
-
-                    last_checkout = attendance_log.check_out
-                    if not last_checkout or (now - last_checkout > DEBOUNCE_TIME):
-                        attendance_log.check_out = now
-                        updated_fields.append('check_out')
-                        attendance_msg = "Đã cập nhật giờ ra"
-                    else:
-                        attendance_msg = "Đã ghi nhận"
-
-                    if updated_fields:
-                        attendance_log.save(update_fields=updated_fields)
+                attendance_msg = (
+                    'Chấm công ra thành công.'
+                    if attendance_action == 'check_out'
+                    else 'Chấm công vào thành công.'
+                )
 
                 return Response({
                     'success': True,
@@ -165,6 +153,8 @@ class RecognizeAPIView(APIView):
                     'employee_name': employee_name,
                     'name': str(employee),
                     'confidence': confidence,
+                    'attendance_action': attendance_action,
+                    'attendance_log_id': attendance_log.id,
                     'attendance_message': attendance_msg,
                 })
             else:
